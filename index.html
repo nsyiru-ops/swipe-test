@@ -2,53 +2,50 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
-  <!-- ✅ iOS 풀스크린 영역 최대 활용 -->
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover" />
-
-  <!-- ✅ 홈화면(PWA)로 추가했을 때 풀스크린 -->
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="theme-color" content="#000000">
 
-  <title>Swipe Scrub</title>
+  <title>Swipe Scrub Loop + Inertia</title>
 
   <style>
     html, body { margin:0; padding:0; background:#000; }
 
-    /* iOS 주소창 변화 대응: 100dvh 사용 */
+    /* ✅ 주소창/하단바에 가려지지 않게: 100svh(작은 뷰포트) 우선 */
     #stage{
       position: fixed;
-      left:0; top:0; right:0; bottom:0;
-      height: 100dvh;
+      left: 0; top: 0;
       width: 100vw;
+      height: 100vh;   /* fallback */
+      height: 100dvh;  /* 최신 */
+      height: 100svh;  /* iOS 주소창 고려(가능하면 이 값이 적용되게 마지막에 둠) */
 
-      /* safe-area(노치/홈바) 보정 */
       padding-top: env(safe-area-inset-top);
       padding-bottom: env(safe-area-inset-bottom);
       padding-left: env(safe-area-inset-left);
       padding-right: env(safe-area-inset-right);
 
-      display:grid;
-      place-items:center;
-      touch-action:none;
-      user-select:none;
-      -webkit-user-select:none;
-      overflow:hidden;
-      background:#000;
+      display: grid;
+      place-items: center;
+      background: #000;
+      overflow: hidden;
+
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
     }
 
+    /* ✅ “잘리지 않게” 보이려면 contain */
     video{
       width: 100%;
       height: 100%;
-      display:block;
-      background:#000;
-      pointer-events:none;
-
-      /* ✅ 여백 없이 꽉 채우려면 cover / 여백 허용이면 contain */
-      object-fit: cover; /* <- contain으로 바꾸면 레터박스(검정 여백) 생김 */
+      object-fit: contain;  /* << 핵심: cover -> contain */
+      display: block;
+      background: #000;
+      pointer-events: none; /* stage가 제스처 받게 */
     }
   </style>
 </head>
+
 <body>
   <div id="stage">
     <video id="v"
@@ -64,29 +61,35 @@
     const stage = document.getElementById('stage');
     const v = document.getElementById('v');
 
-    // ===== 튜닝 =====
-    const SECONDS_PER_PX = 0.012;
-    const FLING_GAIN = 1.4;
-    const DECAY_PER_SEC = 6.5;
-    const MIN_FLING_VEL = 140;
-    const EPS = 0.015; // 시작/끝 데드존 완화
-    // ==============
+    // ========= 튜닝 =========
+    const SECONDS_PER_PX = 0.014;   // 손가락 이동 → 시간 변화(↑ 더 민감/빠름)
+    const FLING_GAIN = 1.8;         // 던지기 세기(↑ 더 휘리릭)
+    const DECAY_PER_SEC = 5.0;      // 감속(↓ 더 오래 미끄러짐)
+    const MIN_FLING_VEL = 80;       // 관성 발동 최소 속도(px/s) (↓ 더 쉽게 발동)
+    const EPS = 0.01;               // 디코더 안정용(0, duration 정확히 피하기)
+    // =======================
 
     function dur() {
       return (isFinite(v.duration) && v.duration > 0) ? v.duration : NaN;
     }
 
-    function clampTime(t){
+    // ✅ 360도 회전 느낌의 핵심: 타임라인을 "무한 루프"로 래핑
+    function wrapTime(t){
       const d = dur();
       if (!isFinite(d)) return 0;
-      const lo = 0 + EPS;
-      const hi = d - EPS;
-      return Math.max(lo, Math.min(hi, t));
+
+      // modulo wrap: 0..d
+      t = ((t % d) + d) % d;
+
+      // 0 또는 d에 정확히 붙으면 iOS에서 검정/튐이 나올 수 있어 살짝 피함
+      if (t < EPS) t = EPS;
+      if (t > d - EPS) t = d - EPS;
+      return t;
     }
 
-    // ✅ iOS에서 첫 프레임 표시 안정화: 메타데이터/첫 프레임 로드되면 위치 고정
+    // iOS: 메타데이터 로드 후 첫 위치 고정
     v.addEventListener('loadedmetadata', () => {
-      try { v.pause(); v.currentTime = clampTime(0); } catch {}
+      try { v.pause(); v.currentTime = wrapTime(0); } catch {}
     });
 
     // ===== 관성 =====
@@ -100,7 +103,7 @@
       stopInertia();
       if (!isFinite(dur())) return;
 
-      let vpx = velPxPerSec * FLING_GAIN;
+      let vpx = velPxPerSec * FLING_GAIN; // px/s
       let last = performance.now();
 
       const step = (now) => {
@@ -108,89 +111,102 @@
         last = now;
 
         vpx *= Math.exp(-DECAY_PER_SEC * dt);
-        if (Math.abs(vpx) < 8) { stopInertia(); return; }
+        if (Math.abs(vpx) < 5) { stopInertia(); return; }
 
         const deltaSeconds = vpx * SECONDS_PER_PX * dt;
-        const next = clampTime(v.currentTime + deltaSeconds);
-
-        const stuck = Math.abs(next - v.currentTime) < 1e-6;
-        v.currentTime = next;
+        v.currentTime = wrapTime(v.currentTime + deltaSeconds);
         v.pause();
 
-        if (stuck) { stopInertia(); return; }
         raf = requestAnimationFrame(step);
       };
+
       raf = requestAnimationFrame(step);
     }
 
-    // ===== 드래그(엣지에서 어느 방향이든 작동하도록 방향 자동반전) =====
-    let dragging=false, lastX=0, lastT=0, vel=0;
+    // ===== 드래그 + 속도 추정(최근 샘플 평균으로 플링 안정화) =====
+    let dragging = false;
+    let lastX = 0;
+    let samples = []; // {t, x}
 
-    function applyDragDx(dx){
-      if (!isFinite(dur())) return;
-
-      let delta = dx * SECONDS_PER_PX;
-      let next = clampTime(v.currentTime + delta);
-
-      // 엣지에서 안 움직이면 반대로 적용(“어느 방향이든 컨트롤”)
-      if (Math.abs(next - v.currentTime) < 1e-6) {
-        delta = (-dx) * SECONDS_PER_PX;
-        next = clampTime(v.currentTime + delta);
-      }
-      if (Math.abs(next - v.currentTime) < 1e-6) return;
-
-      v.currentTime = next;
-      v.pause();
+    function addSample(x){
+      const t = performance.now();
+      samples.push({t, x});
+      // 최근 120ms만 유지
+      const cutoff = t - 120;
+      while (samples.length && samples[0].t < cutoff) samples.shift();
+      if (samples.length > 10) samples.shift();
     }
 
-    stage.addEventListener('pointerdown', (e) => {
-      stopInertia();
-      stage.setPointerCapture(e.pointerId);
-      dragging=true;
-      lastX=e.clientX;
-      lastT=performance.now();
-      vel=0;
+    function computeVelocity(){
+      if (samples.length < 2) return 0;
+      const a = samples[0];
+      const b = samples[samples.length - 1];
+      const dt = (b.t - a.t) / 1000;
+      if (dt <= 0) return 0;
+      return (b.x - a.x) / dt; // px/s
+    }
 
-      // iOS 안정화(제스처 이후 play/pause 시도)
+    function onDown(clientX, pointerId){
+      stopInertia();
+      dragging = true;
+      lastX = clientX;
+      samples = [];
+      addSample(clientX);
+
+      // iOS 안정화: 사용자 제스처에서 play/pause 한 번 시도
       const p = v.play();
       if (p && p.then) p.then(()=>v.pause()).catch(()=>{});
       else { try { v.pause(); } catch {} }
 
-      e.preventDefault();
-    });
+      if (pointerId != null && stage.setPointerCapture) {
+        try { stage.setPointerCapture(pointerId); } catch {}
+      }
+    }
 
-    stage.addEventListener('pointermove', (e) => {
+    function onMove(clientX){
       if (!dragging) return;
       if (!isFinite(dur())) return;
 
-      const now=performance.now();
-      const dx=e.clientX-lastX;
-      const dt=now-lastT;
+      const dx = clientX - lastX;
+      lastX = clientX;
+      addSample(clientX);
 
-      lastX=e.clientX;
-      lastT=now;
-
-      const before=v.currentTime;
-      applyDragDx(dx);
-
-      // 속도 추정(실제 이동 방향 기준)
-      if (dt>0 && Math.abs(v.currentTime-before)>1e-6) {
-        const sign = Math.sign(v.currentTime - before) || 1;
-        const dxEff = Math.abs(dx) * sign;
-        const inst = (dxEff/dt)*1000;
-        vel = vel*0.8 + inst*0.2;
-      }
-
-      e.preventDefault();
-    });
-
-    function endDrag(){
-      if (!dragging) return;
-      dragging=false;
-      if (Math.abs(vel) >= MIN_FLING_VEL) startInertia(vel);
+      // dx -> time (루프이므로 엣지 데드존 없음)
+      v.currentTime = wrapTime(v.currentTime + dx * SECONDS_PER_PX);
+      v.pause();
     }
-    stage.addEventListener('pointerup', endDrag);
-    stage.addEventListener('pointercancel', endDrag);
+
+    function onUp(){
+      if (!dragging) return;
+      dragging = false;
+
+      const vel = computeVelocity(); // px/s
+      if (Math.abs(vel) >= MIN_FLING_VEL) {
+        startInertia(vel);
+      }
+    }
+
+    // Pointer events
+    stage.addEventListener('pointerdown', (e) => { e.preventDefault(); onDown(e.clientX, e.pointerId); });
+    stage.addEventListener('pointermove', (e) => { e.preventDefault(); onMove(e.clientX); });
+    stage.addEventListener('pointerup',   (e) => { e.preventDefault(); onUp(); });
+    stage.addEventListener('pointercancel', (e) => { e.preventDefault(); onUp(); });
+
+    // Touch fallback (혹시 pointer가 끊기는 기기 대비)
+    stage.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      const t = e.touches[0];
+      if (t) onDown(t.clientX, null);
+    }, {passive:false});
+
+    stage.addEventListener('touchmove', (e) => {
+      e.preventDefault();
+      const t = e.touches[0];
+      if (t) onMove(t.clientX);
+    }, {passive:false});
+
+    stage.addEventListener('touchend', (e) => { e.preventDefault(); onUp(); }, {passive:false});
+    stage.addEventListener('touchcancel', (e) => { e.preventDefault(); onUp(); }, {passive:false});
   </script>
 </body>
 </html>
