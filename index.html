@@ -2,69 +2,94 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-  <title>Swipe Scrub MP4 (Inertia)</title>
+  <!-- ✅ iOS 풀스크린 영역 최대 활용 -->
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover" />
+
+  <!-- ✅ 홈화면(PWA)로 추가했을 때 풀스크린 -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#000000">
+
+  <title>Swipe Scrub</title>
+
   <style>
-    html, body { margin:0; height:100%; background:#000; }
+    html, body { margin:0; padding:0; background:#000; }
+
+    /* iOS 주소창 변화 대응: 100dvh 사용 */
     #stage{
-      height:100%;
+      position: fixed;
+      left:0; top:0; right:0; bottom:0;
+      height: 100dvh;
+      width: 100vw;
+
+      /* safe-area(노치/홈바) 보정 */
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+      padding-left: env(safe-area-inset-left);
+      padding-right: env(safe-area-inset-right);
+
       display:grid;
       place-items:center;
+      touch-action:none;
       user-select:none;
       -webkit-user-select:none;
-      touch-action:none;
       overflow:hidden;
+      background:#000;
     }
+
     video{
-      width:100vw; height:100vh;
-      object-fit:contain;
+      width: 100%;
+      height: 100%;
       display:block;
       background:#000;
-      pointer-events:none; /* 이벤트는 stage가 받게 */
+      pointer-events:none;
+
+      /* ✅ 여백 없이 꽉 채우려면 cover / 여백 허용이면 contain */
+      object-fit: cover; /* <- contain으로 바꾸면 레터박스(검정 여백) 생김 */
     }
   </style>
 </head>
 <body>
   <div id="stage">
-    <video id="v" src="video.mp4" preload="auto" playsinline muted></video>
+    <video id="v"
+      src="video.mp4"
+      preload="metadata"
+      playsinline
+      muted
+      poster="poster.jpg"
+    ></video>
   </div>
 
   <script>
-    const v = document.getElementById('v');
     const stage = document.getElementById('stage');
+    const v = document.getElementById('v');
 
-    // ===== 튜닝 포인트 =====
-    const SECONDS_PER_PX = 0.012;     // 드래그 감도(초/px) ↑하면 더 민감
-    const WHEEL_GAIN = 1.8;           // 트랙패드 스크롤(휠) 증폭
-    const FLING_GAIN = 1.0;           // 관성(던지기) 세기
-    const DECAY_PER_SEC = 6.5;        // 관성 감속(크면 빨리 멈춤)
-    const MIN_VELOCITY_PX_PER_SEC = 25; // 이하면 관성 안 걸음
-    // =======================
+    // ===== 튜닝 =====
+    const SECONDS_PER_PX = 0.012;
+    const FLING_GAIN = 1.4;
+    const DECAY_PER_SEC = 6.5;
+    const MIN_FLING_VEL = 140;
+    const EPS = 0.015; // 시작/끝 데드존 완화
+    // ==============
 
-    let armed = false;
+    function dur() {
+      return (isFinite(v.duration) && v.duration > 0) ? v.duration : NaN;
+    }
 
     function clampTime(t){
-      if (!isFinite(v.duration)) return 0;
-      return Math.max(0, Math.min(v.duration, t));
+      const d = dur();
+      if (!isFinite(d)) return 0;
+      const lo = 0 + EPS;
+      const hi = d - EPS;
+      return Math.max(lo, Math.min(hi, t));
     }
 
-    async function unlockOnce(){
-      if (armed) return;
-      armed = true;
-
-      // 첫 상호작용 후 디코드/시킹 안정화(자동재생 아님: 즉시 pause)
-      try { await v.play(); v.pause(); } catch {}
-      try { v.currentTime = 0; } catch {}
-      v.pause();
-    }
-
-    // 메타 로드 시 첫 프레임 정지
+    // ✅ iOS에서 첫 프레임 표시 안정화: 메타데이터/첫 프레임 로드되면 위치 고정
     v.addEventListener('loadedmetadata', () => {
-      v.pause();
-      try { v.currentTime = 0; } catch {}
+      try { v.pause(); v.currentTime = clampTime(0); } catch {}
     });
 
-    // ===== 관성 애니메이션 =====
+    // ===== 관성 =====
     let raf = 0;
     function stopInertia(){
       if (raf) cancelAnimationFrame(raf);
@@ -73,71 +98,87 @@
 
     function startInertia(velPxPerSec){
       stopInertia();
-      let vpx = velPxPerSec * FLING_GAIN; // px/s
+      if (!isFinite(dur())) return;
+
+      let vpx = velPxPerSec * FLING_GAIN;
       let last = performance.now();
 
       const step = (now) => {
-        const dt = (now - last) / 1000; // seconds
+        const dt = (now - last) / 1000;
         last = now;
 
-        // 지수 감속: v(t) = v0 * exp(-k t)
-        const decay = Math.exp(-DECAY_PER_SEC * dt);
-        vpx *= decay;
+        vpx *= Math.exp(-DECAY_PER_SEC * dt);
+        if (Math.abs(vpx) < 8) { stopInertia(); return; }
 
-        if (Math.abs(vpx) < MIN_VELOCITY_PX_PER_SEC) { stopInertia(); return; }
-
-        // px/s -> seconds 이동량
         const deltaSeconds = vpx * SECONDS_PER_PX * dt;
-        const nextTime = clampTime(v.currentTime + deltaSeconds);
+        const next = clampTime(v.currentTime + deltaSeconds);
 
-        // 끝에 닿으면 멈춤
-        const hitEdge = (nextTime === 0 || (isFinite(v.duration) && nextTime === v.duration));
-        v.currentTime = nextTime;
+        const stuck = Math.abs(next - v.currentTime) < 1e-6;
+        v.currentTime = next;
         v.pause();
 
-        if (hitEdge) { stopInertia(); return; }
+        if (stuck) { stopInertia(); return; }
         raf = requestAnimationFrame(step);
       };
-
       raf = requestAnimationFrame(step);
     }
 
-    // ===== 드래그(마우스/터치) =====
-    let dragging = false;
-    let lastX = 0;
-    let lastT = 0;
-    let vel = 0; // px/s (스무딩된 속도)
+    // ===== 드래그(엣지에서 어느 방향이든 작동하도록 방향 자동반전) =====
+    let dragging=false, lastX=0, lastT=0, vel=0;
 
-    stage.addEventListener('pointerdown', async (e) => {
-      await unlockOnce();
+    function applyDragDx(dx){
+      if (!isFinite(dur())) return;
+
+      let delta = dx * SECONDS_PER_PX;
+      let next = clampTime(v.currentTime + delta);
+
+      // 엣지에서 안 움직이면 반대로 적용(“어느 방향이든 컨트롤”)
+      if (Math.abs(next - v.currentTime) < 1e-6) {
+        delta = (-dx) * SECONDS_PER_PX;
+        next = clampTime(v.currentTime + delta);
+      }
+      if (Math.abs(next - v.currentTime) < 1e-6) return;
+
+      v.currentTime = next;
+      v.pause();
+    }
+
+    stage.addEventListener('pointerdown', (e) => {
       stopInertia();
-
       stage.setPointerCapture(e.pointerId);
-      dragging = true;
-      lastX = e.clientX;
-      lastT = performance.now();
-      vel = 0;
+      dragging=true;
+      lastX=e.clientX;
+      lastT=performance.now();
+      vel=0;
+
+      // iOS 안정화(제스처 이후 play/pause 시도)
+      const p = v.play();
+      if (p && p.then) p.then(()=>v.pause()).catch(()=>{});
+      else { try { v.pause(); } catch {} }
+
       e.preventDefault();
     });
 
     stage.addEventListener('pointermove', (e) => {
-      if (!dragging || v.readyState < 2) return;
+      if (!dragging) return;
+      if (!isFinite(dur())) return;
 
-      const now = performance.now();
-      const dx = e.clientX - lastX;
-      const dtMs = now - lastT;
+      const now=performance.now();
+      const dx=e.clientX-lastX;
+      const dt=now-lastT;
 
-      lastX = e.clientX;
-      lastT = now;
+      lastX=e.clientX;
+      lastT=now;
 
-      // 드래그로 시간 이동
-      v.currentTime = clampTime(v.currentTime + dx * SECONDS_PER_PX);
-      v.pause();
+      const before=v.currentTime;
+      applyDragDx(dx);
 
-      // 속도(px/s) 계산 + 스무딩
-      if (dtMs > 0) {
-        const instVel = (dx / dtMs) * 1000; // px/s
-        vel = vel * 0.8 + instVel * 0.2;    // low-pass filter
+      // 속도 추정(실제 이동 방향 기준)
+      if (dt>0 && Math.abs(v.currentTime-before)>1e-6) {
+        const sign = Math.sign(v.currentTime - before) || 1;
+        const dxEff = Math.abs(dx) * sign;
+        const inst = (dxEff/dt)*1000;
+        vel = vel*0.8 + inst*0.2;
       }
 
       e.preventDefault();
@@ -145,29 +186,11 @@
 
     function endDrag(){
       if (!dragging) return;
-      dragging = false;
-
-      // “휙 던지기” 관성
-      if (Math.abs(vel) >= MIN_VELOCITY_PX_PER_SEC) {
-        startInertia(vel);
-      }
+      dragging=false;
+      if (Math.abs(vel) >= MIN_FLING_VEL) startInertia(vel);
     }
-
     stage.addEventListener('pointerup', endDrag);
     stage.addEventListener('pointercancel', endDrag);
-
-    // ===== 트랙패드/휠 스크롤도 스크러빙 (이미 OS 관성이 있어서 별도 관성은 생략) =====
-    stage.addEventListener('wheel', async (e) => {
-      await unlockOnce();
-      stopInertia();
-      if (v.readyState < 2) return;
-
-      // 트랙패드는 deltaY로 “스와이프” 느낌이 들어오는 경우가 많음
-      const d = (Math.abs(e.deltaX) > Math.abs(e.deltaY)) ? e.deltaX : e.deltaY;
-      v.currentTime = clampTime(v.currentTime + (d * WHEEL_GAIN) * SECONDS_PER_PX);
-      v.pause();
-      e.preventDefault();
-    }, { passive:false });
   </script>
 </body>
 </html>
