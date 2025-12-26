@@ -12,11 +12,10 @@
       background: #000;
       overflow: hidden;
       touch-action: none;
+      overscroll-behavior: none;
     }
-
     :root { --vh: 1vh; }
 
-    /* 화면 전체 + iOS 주소창/툴바 변화 대응 */
     #stage {
       position: fixed;
       inset: 0;
@@ -29,17 +28,29 @@
       padding-bottom: env(safe-area-inset-bottom);
       box-sizing: border-box;
       background: #000;
-      -webkit-user-select: none;
       user-select: none;
+      -webkit-user-select: none;
     }
 
-    /* ✅ 발이 안 잘리게: contain */
+    /* ✅ 발 안 잘리게: contain */
     video {
       width: 100%;
       height: 100%;
       object-fit: contain;
       background: #000;
       display: block;
+    }
+
+    /* ✅ iOS에서 poster가 사라지며 검정되는 문제 방지용 오버레이 */
+    #posterOverlay {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: #000;
+      display: block;
+      pointer-events: none;
     }
   </style>
 </head>
@@ -50,19 +61,21 @@
       playsinline webkit-playsinline
       preload="auto"
       muted
-      poster="poster.jpg"
     ></video>
+    <img id="posterOverlay" src="poster.jpg" alt="">
   </div>
 
 <script>
-  // ✅ Netlify mp4 직접 링크 (네가 준 주소 그대로)
+  // ✅ Netlify mp4
   const VIDEO_URL = "https://zippy-flan-5b618a.netlify.app/video.mp4";
 
   const stage = document.getElementById('stage');
   const video = document.getElementById('v');
+  const poster = document.getElementById('posterOverlay');
+
   video.src = VIDEO_URL;
 
-  // iOS 주소창/툴바로 100vh가 흔들리는 문제 대응 (visualViewport 우선)
+  // iOS 주소창 높이 변화 대응
   function setVh(){
     const h = (window.visualViewport?.height ?? window.innerHeight);
     document.documentElement.style.setProperty('--vh', (h * 0.01) + 'px');
@@ -71,20 +84,34 @@
   window.visualViewport?.addEventListener('resize', setVh, {passive:true});
   setVh();
 
+  // ===== 스크럽 파라미터 (끊김/속도 조절) =====
+  const SECONDS_PER_PX = 0.0009;   // ✅ 민감도 (값 ↑ 더 빠름 / 값 ↓ 더 느림)
+  const FRICTION = 0.90;           // ✅ 관성 감속 (값 ↑ 더 오래 미끄러짐)
+  const STOP_V = 0.00002;          // ✅ 멈춤 임계치
+
+  let unlocked = false;
   let ready = false;
   let duration = 0;
-  let primed = false;
 
-  // ===== 스와이프/관성(너무 빠르다 → 더 느리게) =====
-  const SECONDS_PER_PX = 0.0011;  // ✅ 천천히(값 ↓ = 더 느림)
-  const FRICTION = 0.92;          // ✅ 감속(값 ↑ = 더 오래 미끄러짐)
-  const STOP_V = 0.00002;         // ✅ 멈춤 임계치
-
+  // 스와이프 상태
   let dragging = false;
   let lastX = 0;
   let lastT = 0;
-  let vSecPerMs = 0;
-  let rafId = null;
+  let velSecPerMs = 0;
+
+  // 부드럽게: move 이벤트마다 currentTime 때리지 않고 rAF에서 1회만 반영
+  let desiredTime = 0;
+  let applyRaf = null;
+
+  function getDuration(){
+    const d = video.duration;
+    if (isFinite(d) && d > 0) return d;
+    // iOS에서 duration이 Infinity/NaN일 때 대비
+    try {
+      if (video.seekable && video.seekable.length) return video.seekable.end(0);
+    } catch(e){}
+    return 0;
+  }
 
   function wrapTime(t){
     if(!duration || !isFinite(duration)) return 0;
@@ -92,27 +119,60 @@
     if(t < 0) t += duration;
     return t;
   }
-  function setTime(t){
-    if(!ready) return;
-    video.currentTime = wrapTime(t);
+
+  function scheduleApply(){
+    if(applyRaf) return;
+    applyRaf = requestAnimationFrame(() => {
+      applyRaf = null;
+      if(!ready) return;
+      const t = wrapTime(desiredTime);
+      // currentTime 설정이 iOS에서 가끔 throw 할 수 있어서 보호
+      try { video.currentTime = t; } catch(e) {}
+    });
   }
 
-  async function primeOnce(){
-    if(primed) return;
-    primed = true;
+  async function unlockVideoOnce(){
+    if(unlocked) return;
+    unlocked = true;
+
+    // ✅ iOS 핵심: 유저 제스처 안에서 play → pause 한 번 해줘야 스크럽이 안정적으로 먹음
     try{
-      // iOS에서 프레임 표시/시킹 안정화용 1회 play-pause (유저 제스처 안에서 호출)
+      video.muted = true;
       await video.play();
       video.pause();
-    }catch(e){
-      // iOS 정책으로 막혀도 스크럽은 시도됨
+    } catch(e){
+      // 그래도 진행 (일부 환경은 정책/네트워크에 따라 실패할 수 있음)
     }
+
+    // 메타/시킹 준비될 때까지 기다렸다가 첫 프레임 띄우고 poster 오버레이 숨김
+    const tryReady = () => {
+      duration = getDuration();
+      if(duration > 0){
+        ready = true;
+        desiredTime = 0.001; // 0은 검정 나오는 경우가 있어 약간 띄움
+        scheduleApply();
+        // 프레임이 실제로 뜰 시간을 조금 주고 오버레이 제거
+        setTimeout(() => { poster.style.display = "none"; }, 80);
+      }
+    };
+
+    tryReady();
+    // canplay/loadedmetadata 둘 다 훅
+    const onMeta = () => { tryReady(); };
+    video.addEventListener('loadedmetadata', onMeta, {once:true});
+    video.addEventListener('canplay', onMeta, {once:true});
+
+    // 혹시 지연되면 재시도
+    setTimeout(tryReady, 200);
+    setTimeout(tryReady, 600);
   }
 
   function stopInertia(){
-    if(rafId) cancelAnimationFrame(rafId);
-    rafId = null;
+    if(inertiaRaf) cancelAnimationFrame(inertiaRaf);
+    inertiaRaf = null;
   }
+
+  let inertiaRaf = null;
   function startInertia(){
     stopInertia();
     let prev = performance.now();
@@ -121,45 +181,48 @@
       const dt = now - prev;
       prev = now;
 
-      if(Math.abs(vSecPerMs) < STOP_V){
-        vSecPerMs = 0;
-        rafId = null;
+      if(Math.abs(velSecPerMs) < STOP_V){
+        velSecPerMs = 0;
+        inertiaRaf = null;
         return;
       }
 
-      setTime((video.currentTime || 0) + vSecPerMs * dt);
+      desiredTime = (video.currentTime || 0) + velSecPerMs * dt;
+      scheduleApply();
 
-      // 프레임레이트 보정 감속
+      // 감속
       const f = Math.pow(FRICTION, dt / 16.67);
-      vSecPerMs *= f;
+      velSecPerMs *= f;
 
-      rafId = requestAnimationFrame(step);
+      inertiaRaf = requestAnimationFrame(step);
     };
 
-    rafId = requestAnimationFrame(step);
+    inertiaRaf = requestAnimationFrame(step);
   }
 
   function onDown(x){
-    primeOnce();
+    unlockVideoOnce();   // ✅ 첫 터치에서 언락
     dragging = true;
     lastX = x;
     lastT = performance.now();
-    vSecPerMs = 0;
+    velSecPerMs = 0;
     stopInertia();
   }
 
   function onMove(x){
-    if(!dragging || !ready) return;
+    if(!dragging) return;
+    if(!ready) return;
 
     const now = performance.now();
     const dx = x - lastX;
     const dt = now - lastT;
 
-    // ✅ 어느 방향이든 루프처럼 계속 진행(시작/끝에서 “안 먹히는 구간” 제거)
+    // ✅ 양방향 + 루프 느낌: 시작/끝에서 안 먹는 구간 제거
     const deltaSec = (-dx) * SECONDS_PER_PX;
-    setTime((video.currentTime || 0) + deltaSec);
+    desiredTime = (video.currentTime || 0) + deltaSec;
+    scheduleApply();
 
-    if(dt > 0) vSecPerMs = (deltaSec / dt);
+    if(dt > 0) velSecPerMs = (deltaSec / dt);
 
     lastX = x;
     lastT = now;
@@ -168,10 +231,10 @@
   function onUp(){
     if(!dragging) return;
     dragging = false;
-    startInertia(); // ✅ 손 떼면 관성으로 조금 더 가다가 감속
+    startInertia();   // ✅ 손 떼면 관성
   }
 
-  // --- Pointer events (가능하면 이걸 사용)
+  // Pointer events
   stage.addEventListener('pointerdown', (e)=>{
     stage.setPointerCapture?.(e.pointerId);
     onDown(e.clientX);
@@ -185,7 +248,7 @@
   stage.addEventListener('pointerup', onUp, {passive:true});
   stage.addEventListener('pointercancel', onUp, {passive:true});
 
-  // --- iOS 일부 환경 fallback: touch events
+  // Touch fallback
   stage.addEventListener('touchstart', (e)=>{
     if(!e.touches?.length) return;
     onDown(e.touches[0].clientX);
@@ -200,19 +263,17 @@
   stage.addEventListener('touchend', onUp, {passive:true});
   stage.addEventListener('touchcancel', onUp, {passive:true});
 
-  // 메타 로드되면 준비
+  // 혹시 로드되면 준비 (언락 전에는 iOS에서 제대로 안 잡힐 수 있음)
   video.addEventListener('loadedmetadata', ()=>{
-    duration = video.duration || 0;
-    ready = !!(duration && isFinite(duration));
-
-    // 첫 프레임 표시 안정화(0은 가끔 검게 나오는 경우 있어 0.001)
-    if(ready) setTime(0.001);
+    duration = getDuration();
+    ready = (duration > 0);
   });
 
   video.addEventListener('error', ()=>{
-    ready = false;
     console.log("Video error:", video.error);
-    console.log("Check URL:", VIDEO_URL);
+    ready = false;
+    // 에러 시 poster 유지
+    poster.style.display = "block";
   });
 </script>
 </body>
