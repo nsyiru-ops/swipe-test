@@ -2,346 +2,237 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport"
-        content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
-  <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="theme-color" content="#000000" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Swipe Video Scrub</title>
-
   <style>
-    html, body{
-      margin:0; padding:0;
-      width:100%; height:100%;
-      background:#000;
-      overflow:hidden;
-      overscroll-behavior:none;
-      touch-action:none;
-      -webkit-user-select:none;
-      user-select:none;
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #000;
+      height: 100%;
+      overflow: hidden;
     }
 
-    :root{ --vh: 1vh; }
+    .stage {
+      position: fixed;
+      inset: 0;
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+      padding-left: env(safe-area-inset-left);
+      padding-right: env(safe-area-inset-right);
+      box-sizing: border-box;
 
-    #stage{
-      position:fixed;
-      inset:0;
-      width:100%;
-      height:calc(var(--vh) * 100);
-      background:#000;
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      padding-top:env(safe-area-inset-top);
-      padding-bottom:env(safe-area-inset-bottom);
-      padding-left:env(safe-area-inset-left);
-      padding-right:env(safe-area-inset-right);
-      box-sizing:border-box;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+
+      height: 100svh;
+      height: 100dvh;
+      width: 100vw;
+
+      /* iOS에서 touch-action만으로는 부족한 경우가 많아서 JS preventDefault와 같이 씀 */
+      touch-action: none;
+      -webkit-user-select: none;
+      user-select: none;
     }
 
-    video{
-      width:100%;
-      height:100%;
-      object-fit:contain; /* 발/구두 안 잘리게 */
-      background:#000;
-      display:block;
-      -webkit-transform: translateZ(0);
-      transform: translateZ(0);
-    }
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;     /* 잘리지 않게 */
+      background: #000;
+      display: block;
 
-    /* 검정 깜빡임 방지용 포스터 오버레이 */
-    #posterOverlay{
-      position:absolute;
-      inset:0;
-      width:100%;
-      height:100%;
-      object-fit:contain;
-      background:#000;
-      pointer-events:none;
-      display:block;
-    }
+      /* 핵심: 비디오 요소가 터치를 가로채지 않게 */
+      pointer-events: none;
 
-    /* 아주 작은 디버그(필요 없으면 삭제해도 됨) */
-    #tapToStart{
-      position:fixed;
-      left:50%;
-      bottom:calc(env(safe-area-inset-bottom) + 16px);
-      transform:translateX(-50%);
-      padding:10px 14px;
-      border-radius:999px;
-      font:13px/1.2 -apple-system, system-ui, sans-serif;
-      background:rgba(0,0,0,0.35);
-      color:rgba(255,255,255,0.88);
-      backdrop-filter: blur(8px);
-      -webkit-backdrop-filter: blur(8px);
-      pointer-events:none;
-      opacity:0;
-      transition:opacity .2s ease;
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-touch-callout: none;
     }
-    #tapToStart.show{ opacity:1; }
   </style>
 </head>
-
 <body>
-  <div id="stage">
-    <video id="v"
-      playsinline webkit-playsinline
-      preload="auto"
-      muted
+  <div class="stage" id="stage">
+    <video
+      id="v"
+      src="video.mp4"
       poster="poster.jpg"
+      playsinline
+      muted
+      autoplay
+      preload="auto"
     ></video>
-    <img id="posterOverlay" src="poster.jpg" alt="">
   </div>
 
-  <div id="tapToStart">처음 1회 터치로 준비</div>
+  <script>
+    const video = document.getElementById("v");
+    const stage = document.getElementById("stage");
 
-<script>
-  // ====== GitHub Pages에 같은 폴더로 업로드했으면 상대경로로 끝 ======
-  const VIDEO_SRC = "video.mp4";
+    // ===== 튜닝(반응 더 시원하게) =====
+    const SCREEN_WIDTHS_PER_FULL_LOOP = 0.55; // 더 빠르게(0.55~0.75)
+    const FLICK_GAIN = 2.8;                   // 던질 때 더 멀리
+    const FRICTION = 0.0018;                  // 관성 더 길게
+    const MAX_VELOCITY_PX_PER_MS = 3.8;       // 최대 속도 캡
 
-  const stage  = document.getElementById('stage');
-  const video  = document.getElementById('v');
-  const poster = document.getElementById('posterOverlay');
-  const tip    = document.getElementById('tapToStart');
+    let duration = 0;
+    let ready = false;
 
-  video.src = VIDEO_SRC;
+    let down = false;
+    let lastX = 0;
+    let lastT = 0;
+    let vx = 0;
+    let inertiaRaf = 0;
 
-  // iOS 주소창/툴바 높이 변화 대응
-  function setVh(){
-    const h = (window.visualViewport?.height ?? window.innerHeight);
-    document.documentElement.style.setProperty('--vh', (h * 0.01) + 'px');
-  }
-  window.addEventListener('resize', setVh, {passive:true});
-  window.visualViewport?.addEventListener('resize', setVh, {passive:true});
-  setVh();
-
-  // ====== 느낌(속도/가감속) 튜닝 ======
-  // "시원시원" + "가감속 크게"
-  const SECONDS_PER_PX = 0.0024; // 드래그 반응 속도 (↑ 더 빠름)
-  const FRICTION       = 0.955;  // 관성 길이 (↑ 더 오래 미끄러짐)
-  const STOP_V         = 0.000010; // 멈춤 임계 (↓ 더 오래 감)
-  const RELEASE_BOOST  = 1.75;   // 손 떼는 순간 속도 부스트
-  const MAX_STEP_SEC   = 0.12;   // 한 프레임 최대 이동(너무 튀는 것 방지)
-
-  // ====== 상태 ======
-  let unlocked = false;
-  let ready = false;
-  let duration = 0;
-
-  let dragging = false;
-  let lastX = 0;
-  let lastT = 0;
-  let velSecPerMs = 0;
-
-  // 부드럽게: move 이벤트마다 currentTime을 때리지 않고 RAF에서 1회만 적용
-  let desiredTime = 0;
-  let applyRaf = 0;
-
-  // 관성 RAF
-  let inertiaRaf = 0;
-
-  function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
-
-  function getDurationSafe(){
-    const d = video.duration;
-    if (isFinite(d) && d > 0) return d;
-    try {
-      if (video.seekable && video.seekable.length) return video.seekable.end(0);
-    } catch(e){}
-    return 0;
-  }
-
-  function wrapTime(t){
-    if (!duration || !isFinite(duration)) return 0;
-    t = t % duration;
-    if (t < 0) t += duration;
-    return t;
-  }
-
-  // Safari는 fastSeek가 있으면 더 안정적일 때가 있음
-  function setTime(t){
-    if (!ready) return;
-    const nt = wrapTime(t);
-
-    // 너무 촘촘하게 때리면 decode가 밀려 "끊김"이 심해질 수 있어 약간 문턱
-    // (그래도 반응성 유지하도록 아주 낮게)
-    const cur = video.currentTime || 0;
-    if (Math.abs(nt - cur) < 0.0004) return;
-
-    try{
-      if (typeof video.fastSeek === "function") video.fastSeek(nt);
-      else video.currentTime = nt;
-    }catch(e){}
-  }
-
-  function scheduleApply(){
-    if (applyRaf) return;
-    applyRaf = requestAnimationFrame(()=>{
-      applyRaf = 0;
-      setTime(desiredTime);
-    });
-  }
-
-  // iOS: 첫 제스처에서 play→pause로 "언락"해야 스크럽이 잘 됨
-  async function unlockOnce(){
-    if (unlocked) return;
-    unlocked = true;
-
-    tip.classList.remove('show');
-
-    try{
-      video.muted = true;
-      const p = video.play();
-      if (p && p.then) await p;
-      video.pause();
-    }catch(e){
-      // 정책/상황에 따라 실패할 수 있어도 스크럽은 시도
+    function modTime(t) {
+      if (!duration || !isFinite(duration)) return 0;
+      const eps = 0.0005;
+      let x = t % duration;
+      if (x < 0) x += duration;
+      if (x >= duration) x = duration - eps;
+      return x;
     }
 
-    // 메타 준비 체크
-    const tryReady = ()=>{
-      duration = getDurationSafe();
-      if (duration > 0){
-        ready = true;
-        desiredTime = 0.001;
-        scheduleApply();
-        // 첫 프레임이 뜰 타이밍에 포스터 숨김
-        setTimeout(()=>{ poster.style.display = "none"; }, 60);
-      } else {
-        // 아직 준비 안 됐으면 다시
-        setTimeout(tryReady, 150);
+    function secondsPerPixel() {
+      const w = Math.max(1, window.innerWidth);
+      return duration / (w * SCREEN_WIDTHS_PER_FULL_LOOP);
+    }
+
+    function stopInertia() {
+      if (inertiaRaf) cancelAnimationFrame(inertiaRaf);
+      inertiaRaf = 0;
+    }
+
+    function stepTo(newTime) {
+      video.currentTime = modTime(newTime);
+    }
+
+    async function primeIOSVideo() {
+      // iOS에서 스크럽 안정화: 유저 제스처 안에서 play->pause 한번
+      try {
+        await video.play();
+        video.pause();
+      } catch (_) {
+        // autoplay 정책/상황에 따라 실패할 수 있음 (그래도 touch 이벤트는 유지)
       }
-    };
-    tryReady();
-  }
+    }
 
-  // 메타 이벤트
-  video.addEventListener('loadedmetadata', ()=>{
-    duration = getDurationSafe();
-    ready = duration > 0;
-  });
-  video.addEventListener('canplay', ()=>{
-    duration = getDurationSafe();
-    ready = duration > 0;
-  });
+    function onDown(clientX) {
+      if (!ready) return;
 
-  video.addEventListener('error', ()=>{
-    ready = false;
-    poster.style.display = "block";
-    tip.textContent = "video.mp4 로드 실패(경로/업로드 확인)";
-    tip.classList.add('show');
-    console.log("Video error:", video.error);
-  });
+      down = true;
+      stopInertia();
 
-  // 관성
-  function stopInertia(){
-    if (inertiaRaf) cancelAnimationFrame(inertiaRaf);
-    inertiaRaf = 0;
-  }
+      lastX = clientX;
+      lastT = performance.now();
+      vx = 0;
 
-  function startInertia(){
-    stopInertia();
-    let prev = performance.now();
+      // 첫 제스처 때 디코드 깨우기
+      if (video.paused) primeIOSVideo();
+    }
 
-    const step = (now)=>{
-      const dt = now - prev;
-      prev = now;
+    function onMove(clientX) {
+      if (!down || !ready) return;
 
-      if (!ready) { inertiaRaf = 0; return; }
-      if (Math.abs(velSecPerMs) < STOP_V){
-        velSecPerMs = 0;
-        inertiaRaf = 0;
-        return;
+      const now = performance.now();
+      const dx = clientX - lastX;
+      const dt = Math.max(1, now - lastT);
+
+      const instV = dx / dt;        // px/ms
+      vx = 0.75 * vx + 0.25 * instV;
+
+      // dx>0(오른쪽) => 시간을 뒤로, dx<0(왼쪽) => 앞으로
+      const base = (-dx) * secondsPerPixel();
+
+      const speed = Math.min(MAX_VELOCITY_PX_PER_MS, Math.abs(vx));
+      const gain = 1 + (speed * FLICK_GAIN);
+
+      stepTo(video.currentTime + base * gain);
+
+      lastX = clientX;
+      lastT = now;
+    }
+
+    function onUp() {
+      if (!down || !ready) return;
+      down = false;
+
+      let v = Math.max(-MAX_VELOCITY_PX_PER_MS, Math.min(MAX_VELOCITY_PX_PER_MS, vx));
+      let last = performance.now();
+
+      function tick() {
+        const now = performance.now();
+        const dt = now - last;
+        last = now;
+
+        const decay = Math.exp(-FRICTION * dt);
+        v *= decay;
+
+        if (Math.abs(v) < 0.02) {
+          inertiaRaf = 0;
+          return;
+        }
+
+        const ds = (-v) * secondsPerPixel() * dt;
+        stepTo(video.currentTime + ds);
+
+        inertiaRaf = requestAnimationFrame(tick);
       }
 
-      // 이동량 제한
-      const delta = clamp(velSecPerMs * dt, -MAX_STEP_SEC, MAX_STEP_SEC);
-      desiredTime = (video.currentTime || 0) + delta;
-      scheduleApply();
+      inertiaRaf = requestAnimationFrame(tick);
+    }
 
-      // 감속(프레임 보정)
-      const f = Math.pow(FRICTION, dt / 16.67);
-      velSecPerMs *= f;
+    // ===== iOS에서 핵심: passive:false + preventDefault =====
+    function getTouchX(e) {
+      const t = e.touches && e.touches[0];
+      return t ? t.clientX : 0;
+    }
 
-      inertiaRaf = requestAnimationFrame(step);
-    };
-    inertiaRaf = requestAnimationFrame(step);
-  }
+    stage.addEventListener("touchstart", (e) => {
+      if (e.cancelable) e.preventDefault();
+      onDown(getTouchX(e));
+    }, { passive: false });
 
-  // 입력
-  function onDown(x){
-    unlockOnce();
-    dragging = true;
-    lastX = x;
-    lastT = performance.now();
-    velSecPerMs = 0;
-    stopInertia();
-  }
+    stage.addEventListener("touchmove", (e) => {
+      if (e.cancelable) e.preventDefault();
+      onMove(getTouchX(e));
+    }, { passive: false });
 
-  function onMove(x){
-    if (!dragging || !ready) return;
+    stage.addEventListener("touchend", (e) => {
+      if (e.cancelable) e.preventDefault();
+      onUp();
+    }, { passive: false });
 
-    const now = performance.now();
-    const dx = x - lastX;
-    const dt = Math.max(1, now - lastT);
+    stage.addEventListener("touchcancel", (e) => {
+      if (e.cancelable) e.preventDefault();
+      onUp();
+    }, { passive: false });
 
-    // 왼쪽 스와이프=앞으로(+), 오른쪽=뒤로(-) 느낌이 싫으면 부호만 바꾸면 됨
-    const deltaSec = (-dx) * SECONDS_PER_PX;
+    // 데스크탑 드래그
+    stage.addEventListener("pointerdown", (e) => {
+      stage.setPointerCapture?.(e.pointerId);
+      onDown(e.clientX);
+    });
+    stage.addEventListener("pointermove", (e) => onMove(e.clientX));
+    stage.addEventListener("pointerup", () => onUp());
+    stage.addEventListener("pointercancel", () => onUp());
 
-    desiredTime = (video.currentTime || 0) + deltaSec;
-    scheduleApply();
+    // ===== 비디오 준비 =====
+    video.addEventListener("loadedmetadata", () => {
+      duration = video.duration || 0;
+      ready = !!duration;
 
-    velSecPerMs = (deltaSec / dt);
+      // autoplay로 로드만 시키고 바로 pause (스크럽 모드)
+      try { video.pause(); } catch (_) {}
 
-    lastX = x;
-    lastT = now;
-  }
+      // 첫 프레임 확정
+      stepTo(0);
+    });
 
-  function onUp(){
-    if (!dragging) return;
-    dragging = false;
-
-    // 던지는 느낌 크게
-    velSecPerMs *= RELEASE_BOOST;
-
-    startInertia();
-  }
-
-  // 안내: iOS에서 최초 1회 터치 필요할 때 표시
-  setTimeout(()=>{
-    if (!unlocked) tip.classList.add('show');
-  }, 400);
-
-  // Pointer events
-  stage.addEventListener('pointerdown', (e)=>{
-    e.preventDefault();
-    stage.setPointerCapture?.(e.pointerId);
-    onDown(e.clientX);
-  }, {passive:false});
-
-  stage.addEventListener('pointermove', (e)=>{
-    e.preventDefault();
-    onMove(e.clientX);
-  }, {passive:false});
-
-  stage.addEventListener('pointerup', (e)=>{ onUp(); }, {passive:true});
-  stage.addEventListener('pointercancel', (e)=>{ onUp(); }, {passive:true});
-
-  // Touch fallback
-  stage.addEventListener('touchstart', (e)=>{
-    e.preventDefault();
-    if (!e.touches?.length) return;
-    onDown(e.touches[0].clientX);
-  }, {passive:false});
-
-  stage.addEventListener('touchmove', (e)=>{
-    e.preventDefault();
-    if (!e.touches?.length) return;
-    onMove(e.touches[0].clientX);
-  }, {passive:false});
-
-  stage.addEventListener('touchend', (e)=>{ onUp(); }, {passive:true});
-  stage.addEventListener('touchcancel', (e)=>{ onUp(); }, {passive:true});
-</script>
+    // iOS에서 autoplay 성공해도 pause로 돌려놓기
+    video.addEventListener("play", () => {
+      setTimeout(() => { try { video.pause(); } catch (_) {} }, 0);
+    });
+  </script>
 </body>
 </html>
