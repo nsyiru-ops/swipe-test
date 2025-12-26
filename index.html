@@ -2,283 +2,283 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
   <title>Swipe Video Scrub</title>
   <style>
     html, body {
       margin: 0;
       padding: 0;
-      background: #000;
       height: 100%;
-      overscroll-behavior: none;
+      background: #000;
+      overflow: hidden; /* 스크롤로 스와이프가 먹히는 것 방지 */
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-touch-callout: none;
+      touch-action: none; /* 중요: iOS에서 기본 스크롤/뒤로가기 제스처 억제 */
     }
 
-    /* iOS/모바일 주소창(동적 뷰포트) 대응: dvh/svh 사용 */
-    .stage {
+    /* iOS 주소창/툴바에 가리지 않게: innerHeight 기반 --vh 사용 */
+    :root { --vh: 1vh; }
+
+    #stage {
       position: fixed;
       inset: 0;
-      width: 100vw;
-
-      height: 100vh; /* fallback */
-      height: 100svh; /* iOS Safari */
-    }
-    @supports (height: 100dvh) {
-      .stage { height: 100dvh; } /* 주소창 포함/제외 변화에 가장 안정적 */
-    }
-
-    /* safe-area(노치/홈바) 영역만큼 패딩 */
-    .stage {
+      width: 100%;
+      height: calc(var(--vh) * 100);
+      display: flex;
+      align-items: center;
+      justify-content: center;
       padding-top: env(safe-area-inset-top);
-      padding-right: env(safe-area-inset-right);
       padding-bottom: env(safe-area-inset-bottom);
-      padding-left: env(safe-area-inset-left);
       box-sizing: border-box;
-      display: grid;
-      place-items: center;
-      touch-action: none; /* 스와이프를 브라우저 스크롤로 빼앗기지 않게 */
-      user-select: none;
-      -webkit-user-select: none;
+      background: #000;
     }
 
+    /* "구두까지 다 보이게": contain으로 전체가 화면 안에 들어오게 */
     video {
       width: 100%;
       height: 100%;
-      max-width: 100%;
-      max-height: 100%;
-
-      /* “잘리지 않게” (필요하면 검은 여백 생김) */
-      object-fit: contain;
+      object-fit: contain; /* ✅ 전체가 보이도록 (잘림 방지) */
+      display: block;
       background: #000;
-
-      /* iOS에서 터치 스크럽 부드럽게 */
-      -webkit-transform: translateZ(0);
-      transform: translateZ(0);
     }
 
-    /* (선택) 아주 작은 안내 텍스트: 필요 없으면 삭제해도 됨 */
-    .hint {
+    /* 로딩/에러 안내(원하면 나중에 지워도 됨) */
+    #overlay {
       position: fixed;
-      left: 50%;
+      left: 0; right: 0;
       bottom: calc(env(safe-area-inset-bottom) + 14px);
-      transform: translateX(-50%);
+      display: flex;
+      justify-content: center;
+      pointer-events: none;
+      z-index: 10;
+      font: 14px/1.2 -apple-system, system-ui, sans-serif;
+      color: rgba(255,255,255,0.85);
+      text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+    }
+    #overlay > div{
+      background: rgba(0,0,0,0.35);
       padding: 8px 12px;
       border-radius: 999px;
-      font: 12px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: rgba(0,0,0,0.45);
-      color: rgba(255,255,255,0.85);
-      pointer-events: none;
-      opacity: 0.9;
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
     }
-    .hint.hidden { opacity: 0; transition: opacity 300ms ease; }
+
+    /* ✅ 하단 문구 없애고 싶으면: 아래 주석 해제하면 끝
+       (요청 3번: 완전 제거) */
+    /* #overlay { display:none !important; } */
   </style>
 </head>
+
 <body>
-  <div class="stage" id="stage">
-    <video
-      id="v"
-      playsinline
-      muted
-      preload="metadata"
+  <div id="stage">
+    <video id="v"
+      src="video.mp4"
       poster="poster.jpg"
-      crossorigin="anonymous"
+      playsinline
+      webkit-playsinline
+      preload="auto"
+      muted
     ></video>
   </div>
-  <div class="hint" id="hint">좌/우로 스와이프 · 휙 던지면 관성</div>
+
+  <!-- 하단 문구(원하면 CSS에서 display:none 처리) -->
+  <div id="overlay"><div id="msg">로딩중… (처음 1회 터치로 준비)</div></div>
 
   <script>
-    // ✅ Netlify mp4 주소
-    const VIDEO_URL = "https://zippy-flan-5b618a.netlify.app/video.mp4";
+    const video = document.getElementById('v');
+    const msg = document.getElementById('msg');
 
-    const stage = document.getElementById("stage");
-    const video = document.getElementById("v");
-    const hint = document.getElementById("hint");
+    // ✅ 주소창/툴바 영역에 가리지 않게(가장 효과 큼)
+    function setVh() {
+      document.documentElement.style.setProperty('--vh', (window.innerHeight * 0.01) + 'px');
+    }
+    window.addEventListener('resize', setVh, { passive: true });
+    setVh();
 
-    video.src = VIDEO_URL;
-
-    // ---------- 튜닝 파라미터(여기만 조절하면 감성 맞추기 쉬움) ----------
-    const SECONDS_PER_PX = 0.009;   // 드래그 민감도(낮을수록 천천히)
-    const FLING_GAIN     = 1.15;    // 던지기(관성) 세기(낮출수록 덜 튐)
-    const DECAY_PER_SEC  = 6.5;     // 감속(높을수록 빨리 멈춤)
-    const MIN_INERTIA    = 0.02;    // 이 값보다 느려지면 관성 정지 (sec/sec)
-    // --------------------------------------------------------------------
-
-    let dur = 0;
+    // =========================
+    // 스와이프 → currentTime 스크럽 + 관성
+    // =========================
+    let duration = 0;
     let ready = false;
+    let primed = false;
 
-    // 입력 상태
+    // 속도 튜닝 포인트 (요청: 관성이 너무 빨라 → 더 천천히)
+    const SECONDS_PER_PX = 0.0022; // ✅ 작을수록 "천천히" 움직임 (0.0018~0.003 사이로 조절)
+    const FRICTION = 0.92;         // ✅ 관성 감속(0.90~0.96). 숫자 높을수록 오래 감.
+    const STOP_V = 0.00002;        // 관성 정지 임계값(작을수록 오래 감)
+
     let dragging = false;
-    let startX = 0;
-    let baseTime = 0;
-
-    // 속도 추정(px/sec)
     let lastX = 0;
-    let lastMoveT = 0;
-    let vx = 0;
+    let lastT = 0;
+    let vSecPerMs = 0;  // 관성용 속도 (초/밀리초)
+    let rafId = null;
 
-    // 시간 제어
-    let targetTime = 0;
-    let inertia = 0;  // sec/sec
-    let ticking = false;
-    let rafId = 0;
-
-    function clamp01(x) { return Math.max(0, Math.min(1, x)); }
-
-    // 루프 스크럽: 0~dur 사이로 감기
     function wrapTime(t) {
-      if (!dur || !isFinite(dur) || dur <= 0) return 0;
-      // JS mod가 음수일 수 있어 보정
-      t = ((t % dur) + dur) % dur;
-      // 아주 끝(dur) 정확히 찍으면 브라우저가 dur로 스냅하면서 멈칫할 수 있어 살짝 안쪽으로
-      const EPS = 1e-4;
-      if (t >= dur) t = dur - EPS;
+      if (!duration || !isFinite(duration)) return 0;
+      // ✅ 끝/처음에서 막히지 않게 "루프 스크럽"
+      t = t % duration;
+      if (t < 0) t += duration;
       return t;
     }
 
-    function ensureTick() {
-      if (ticking) return;
-      ticking = true;
-      rafId = requestAnimationFrame(tick);
-    }
-
-    function stopTick() {
-      ticking = false;
-      cancelAnimationFrame(rafId);
-    }
-
-    function tick(ts) {
-      if (!ticking) return;
-
-      // dt(sec)
-      if (!tick.prev) tick.prev = ts;
-      const dt = Math.min(0.05, (ts - tick.prev) / 1000);
-      tick.prev = ts;
-
-      // 드래그 중이면 targetTime을 반영
-      if (dragging && ready) {
-        // 너무 잦은 currentTime 변경을 RAF에 묶어서 부드럽게
-        const t = wrapTime(targetTime);
-        if (!Number.isNaN(t)) video.currentTime = t;
-      }
-
-      // 관성 진행
-      if (!dragging && ready && Math.abs(inertia) > 0) {
-        let t = video.currentTime + inertia * dt;
-        video.currentTime = wrapTime(t);
-
-        // 지수감쇠(부드럽게 감속)
-        const decay = Math.exp(-DECAY_PER_SEC * dt);
-        inertia *= decay;
-
-        if (Math.abs(inertia) < MIN_INERTIA) inertia = 0;
-      }
-
-      // 계속 돌릴지 판단
-      if (dragging || Math.abs(inertia) > 0) {
-        rafId = requestAnimationFrame(tick);
-      } else {
-        stopTick();
-      }
-    }
-
-    function onDown(e) {
-      // iOS에서 스크롤/뒤로가기 제스처 뺏기 방지
-      e.preventDefault();
-
+    function setTime(t) {
       if (!ready) return;
-
-      dragging = true;
-      inertia = 0;
-
-      startX = e.clientX;
-      baseTime = video.currentTime;
-
-      lastX = e.clientX;
-      lastMoveT = performance.now();
-      vx = 0;
-
-      // 안내 문구 숨김
-      hint?.classList.add("hidden");
-
-      stage.setPointerCapture?.(e.pointerId);
-      ensureTick();
-    }
-
-    function onMove(e) {
-      if (!dragging || !ready) return;
-      e.preventDefault();
-
-      const x = e.clientX;
-      const dx = x - startX;
-
-      // 목표 시간 업데이트
-      targetTime = baseTime + dx * SECONDS_PER_PX;
-
-      // 속도 추정(px/sec)
-      const now = performance.now();
-      const dt = Math.max(1, now - lastMoveT); // ms
-      const v = (x - lastX) / (dt / 1000);     // px/sec
-
-      // 너무 튀지 않게 저역통과(부드럽게)
-      vx = vx * 0.7 + v * 0.3;
-
-      lastX = x;
-      lastMoveT = now;
-
-      ensureTick();
-    }
-
-    function onUp(e) {
-      if (!dragging || !ready) return;
-      e.preventDefault();
-
-      dragging = false;
-
-      // 드래그 속도를 시간 속도로 변환 → 관성 시작
-      // vx(px/sec) * SECONDS_PER_PX(sec/px) = sec/sec
-      inertia = vx * SECONDS_PER_PX * FLING_GAIN;
-
-      // 너무 미세한 움직임은 관성 제거
-      if (Math.abs(inertia) < MIN_INERTIA) inertia = 0;
-
-      ensureTick();
-    }
-
-    // Pointer Events (iOS Safari 13+ 대부분 OK)
-    stage.addEventListener("pointerdown", onDown, { passive: false });
-    stage.addEventListener("pointermove", onMove, { passive: false });
-    stage.addEventListener("pointerup", onUp, { passive: false });
-    stage.addEventListener("pointercancel", onUp, { passive: false });
-
-    // iOS에서 더블탭 확대 방지(원치 않으면 삭제)
-    stage.addEventListener("dblclick", (e) => e.preventDefault());
-
-    // 비디오 준비
-    video.addEventListener("loadedmetadata", () => {
-      dur = video.duration || 0;
-      ready = true;
-
-      // 첫 프레임/포스터 안정화: 메타 로드 후 0초로 맞추고 정지
-      try {
-        video.currentTime = 0;
-        video.pause();
-      } catch (_) {}
-    });
-
-    // 혹시 duration이 늦게 잡히는 경우 대비
-    video.addEventListener("durationchange", () => {
-      dur = video.duration || dur;
-    });
-
-    // 페이지가 백그라운드 갔다 오면 tick 상태 정리
-    document.addEventListener("visibilitychange", () => {
-      if (document.hidden) {
-        dragging = false;
-        inertia = 0;
-        stopTick();
+      const nt = wrapTime(t);
+      // iOS에서 너무 자주 set하면 버벅일 수 있어서 약간 문턱
+      if (Math.abs((video.currentTime || 0) - nt) > 0.0005) {
+        video.currentTime = nt;
       }
+    }
+
+    async function primeVideoOnce() {
+      if (primed) return;
+      primed = true;
+
+      // iOS에서 "poster만 보이는" 케이스를 줄이기 위한 1회 준비.
+      // ✅ 사용자의 터치(제스처) 안에서 play->pause를 짧게 실행하면 디코드가 풀리는 경우가 많음.
+      try {
+        msg.textContent = "준비 중…";
+        video.muted = true;
+        const p = video.play();
+        if (p && p.then) await p;
+        video.pause();
+        // 첫 프레임 확실히 표시
+        setTime(video.currentTime || 0);
+        msg.textContent = ""; // 로딩 문구 제거
+      } catch (e) {
+        // 그래도 스크럽 자체는 될 수 있으니 안내만
+        msg.textContent = "터치로 재생 권한이 필요할 수 있어요";
+      }
+    }
+
+    function stopInertia() {
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+
+    function startInertia() {
+      stopInertia();
+      let prev = performance.now();
+      const step = (now) => {
+        const dt = now - prev;
+        prev = now;
+
+        // 속도로 진행
+        if (Math.abs(vSecPerMs) < STOP_V) {
+          vSecPerMs = 0;
+          rafId = null;
+          return;
+        }
+
+        const next = (video.currentTime || 0) + vSecPerMs * dt;
+        setTime(next);
+
+        // 감속
+        // dt가 커도 자연스럽게 감속되도록 지수 형태로
+        const f = Math.pow(FRICTION, dt / 16.67);
+        vSecPerMs *= f;
+
+        rafId = requestAnimationFrame(step);
+      };
+      rafId = requestAnimationFrame(step);
+    }
+
+    function onDown(clientX) {
+      primeVideoOnce();
+      dragging = true;
+      lastX = clientX;
+      lastT = performance.now();
+      vSecPerMs = 0;
+      stopInertia();
+    }
+
+    function onMove(clientX) {
+      if (!dragging || !ready) return;
+
+      const now = performance.now();
+      const dx = clientX - lastX;
+      const dt = now - lastT;
+
+      // 왼쪽으로 드래그하면 앞으로(+) 진행, 오른쪽이면 뒤로(-)
+      const deltaSec = (-dx) * SECONDS_PER_PX;
+      setTime((video.currentTime || 0) + deltaSec);
+
+      // 관성 속도(초/밀리초)
+      if (dt > 0) {
+        vSecPerMs = (deltaSec / dt);
+      }
+
+      lastX = clientX;
+      lastT = now;
+    }
+
+    function onUp() {
+      if (!dragging) return;
+      dragging = false;
+      // 손을 "휙 던지면" 관성으로 더 가다가 서서히 멈춤
+      startInertia();
+    }
+
+    // Pointer Events 우선 (대부분 iOS/Android 최신 OK)
+    const stage = document.getElementById('stage');
+
+    stage.addEventListener('pointerdown', (e) => {
+      stage.setPointerCapture?.(e.pointerId);
+      onDown(e.clientX);
+    }, { passive: false });
+
+    stage.addEventListener('pointermove', (e) => {
+      // 스크롤/뒤로가기 제스처 방지
+      e.preventDefault();
+      onMove(e.clientX);
+    }, { passive: false });
+
+    stage.addEventListener('pointerup', (e) => { onUp(); }, { passive: true });
+    stage.addEventListener('pointercancel', (e) => { onUp(); }, { passive: true });
+
+    // (보험) Touch fallback
+    stage.addEventListener('touchstart', (e) => {
+      if (e.touches && e.touches[0]) onDown(e.touches[0].clientX);
+    }, { passive: true });
+
+    stage.addEventListener('touchmove', (e) => {
+      e.preventDefault();
+      if (e.touches && e.touches[0]) onMove(e.touches[0].clientX);
+    }, { passive: false });
+
+    stage.addEventListener('touchend', () => onUp(), { passive: true });
+    stage.addEventListener('touchcancel', () => onUp(), { passive: true });
+
+    // 비디오 로딩 상태
+    function markReady() {
+      duration = video.duration || 0;
+      if (duration && isFinite(duration)) {
+        ready = true;
+        msg.textContent = ""; // 로딩 문구 제거
+      }
+    }
+
+    video.addEventListener('loadedmetadata', () => {
+      markReady();
+      // 첫 프레임 표시 강제(가끔 poster만 보이는 케이스 줄임)
+      setTime(video.currentTime || 0);
     });
+
+    video.addEventListener('canplay', () => {
+      markReady();
+    });
+
+    video.addEventListener('error', () => {
+      ready = false;
+      msg.textContent = "video.mp4 로드 실패 (경로/파일명/업로드 확인)";
+    });
+
+    // 혹시 로딩이 느릴 때 안내
+    setTimeout(() => {
+      if (!ready) msg.textContent = "로딩중… (처음 1회 터치 필요)";
+    }, 300);
   </script>
 </body>
 </html>
