@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>Swipe Scrub MP4 (Inertia)</title>
+  <style>
+    html, body { margin:0; height:100%; background:#000; }
+    #stage{
+      height:100%;
+      display:grid;
+      place-items:center;
+      user-select:none;
+      -webkit-user-select:none;
+      touch-action:none;
+      overflow:hidden;
+    }
+    video{
+      width:100vw; height:100vh;
+      object-fit:contain;
+      display:block;
+      background:#000;
+      pointer-events:none; /* 이벤트는 stage가 받게 */
+    }
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <video id="v" src="video.mp4" preload="auto" playsinline muted></video>
+  </div>
+
+  <script>
+    const v = document.getElementById('v');
+    const stage = document.getElementById('stage');
+
+    // ===== 튜닝 포인트 =====
+    const SECONDS_PER_PX = 0.012;     // 드래그 감도(초/px) ↑하면 더 민감
+    const WHEEL_GAIN = 1.8;           // 트랙패드 스크롤(휠) 증폭
+    const FLING_GAIN = 1.0;           // 관성(던지기) 세기
+    const DECAY_PER_SEC = 6.5;        // 관성 감속(크면 빨리 멈춤)
+    const MIN_VELOCITY_PX_PER_SEC = 25; // 이하면 관성 안 걸음
+    // =======================
+
+    let armed = false;
+
+    function clampTime(t){
+      if (!isFinite(v.duration)) return 0;
+      return Math.max(0, Math.min(v.duration, t));
+    }
+
+    async function unlockOnce(){
+      if (armed) return;
+      armed = true;
+
+      // 첫 상호작용 후 디코드/시킹 안정화(자동재생 아님: 즉시 pause)
+      try { await v.play(); v.pause(); } catch {}
+      try { v.currentTime = 0; } catch {}
+      v.pause();
+    }
+
+    // 메타 로드 시 첫 프레임 정지
+    v.addEventListener('loadedmetadata', () => {
+      v.pause();
+      try { v.currentTime = 0; } catch {}
+    });
+
+    // ===== 관성 애니메이션 =====
+    let raf = 0;
+    function stopInertia(){
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+    }
+
+    function startInertia(velPxPerSec){
+      stopInertia();
+      let vpx = velPxPerSec * FLING_GAIN; // px/s
+      let last = performance.now();
+
+      const step = (now) => {
+        const dt = (now - last) / 1000; // seconds
+        last = now;
+
+        // 지수 감속: v(t) = v0 * exp(-k t)
+        const decay = Math.exp(-DECAY_PER_SEC * dt);
+        vpx *= decay;
+
+        if (Math.abs(vpx) < MIN_VELOCITY_PX_PER_SEC) { stopInertia(); return; }
+
+        // px/s -> seconds 이동량
+        const deltaSeconds = vpx * SECONDS_PER_PX * dt;
+        const nextTime = clampTime(v.currentTime + deltaSeconds);
+
+        // 끝에 닿으면 멈춤
+        const hitEdge = (nextTime === 0 || (isFinite(v.duration) && nextTime === v.duration));
+        v.currentTime = nextTime;
+        v.pause();
+
+        if (hitEdge) { stopInertia(); return; }
+        raf = requestAnimationFrame(step);
+      };
+
+      raf = requestAnimationFrame(step);
+    }
+
+    // ===== 드래그(마우스/터치) =====
+    let dragging = false;
+    let lastX = 0;
+    let lastT = 0;
+    let vel = 0; // px/s (스무딩된 속도)
+
+    stage.addEventListener('pointerdown', async (e) => {
+      await unlockOnce();
+      stopInertia();
+
+      stage.setPointerCapture(e.pointerId);
+      dragging = true;
+      lastX = e.clientX;
+      lastT = performance.now();
+      vel = 0;
+      e.preventDefault();
+    });
+
+    stage.addEventListener('pointermove', (e) => {
+      if (!dragging || v.readyState < 2) return;
+
+      const now = performance.now();
+      const dx = e.clientX - lastX;
+      const dtMs = now - lastT;
+
+      lastX = e.clientX;
+      lastT = now;
+
+      // 드래그로 시간 이동
+      v.currentTime = clampTime(v.currentTime + dx * SECONDS_PER_PX);
+      v.pause();
+
+      // 속도(px/s) 계산 + 스무딩
+      if (dtMs > 0) {
+        const instVel = (dx / dtMs) * 1000; // px/s
+        vel = vel * 0.8 + instVel * 0.2;    // low-pass filter
+      }
+
+      e.preventDefault();
+    });
+
+    function endDrag(){
+      if (!dragging) return;
+      dragging = false;
+
+      // “휙 던지기” 관성
+      if (Math.abs(vel) >= MIN_VELOCITY_PX_PER_SEC) {
+        startInertia(vel);
+      }
+    }
+
+    stage.addEventListener('pointerup', endDrag);
+    stage.addEventListener('pointercancel', endDrag);
+
+    // ===== 트랙패드/휠 스크롤도 스크러빙 (이미 OS 관성이 있어서 별도 관성은 생략) =====
+    stage.addEventListener('wheel', async (e) => {
+      await unlockOnce();
+      stopInertia();
+      if (v.readyState < 2) return;
+
+      // 트랙패드는 deltaY로 “스와이프” 느낌이 들어오는 경우가 많음
+      const d = (Math.abs(e.deltaX) > Math.abs(e.deltaY)) ? e.deltaX : e.deltaY;
+      v.currentTime = clampTime(v.currentTime + (d * WHEEL_GAIN) * SECONDS_PER_PX);
+      v.pause();
+      e.preventDefault();
+    }, { passive:false });
+  </script>
+</body>
+</html>
