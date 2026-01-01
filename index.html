@@ -84,6 +84,14 @@
     let vx = 0;
     let inertiaRaf = 0;
 
+    // ===== 탭(재생/정지) 판정 =====
+    let allowPlay = false;   // 사용자가 탭으로 재생을 명시적으로 허용했는지
+    let tapMaybe = false;
+    let tapStartX = 0;
+    let tapStartT = 0;
+    const TAP_SLOP_PX = 10;
+    const TAP_MAX_MS = 250;
+
     function modTime(t) {
       if (!duration || !isFinite(duration)) return 0;
       const eps = 0.0005;
@@ -117,8 +125,28 @@
       }
     }
 
+    async function togglePlay() {
+      if (!ready) return;
+      stopInertia();
+
+      if (video.paused) {
+        allowPlay = true;
+        video.loop = true;
+        try { await video.play(); } catch (_) {}
+      } else {
+        allowPlay = false;
+        try { video.pause(); } catch (_) {}
+      }
+    }
+
     function onDown(clientX) {
       if (!ready) return;
+
+      // 재생 중 스와이프 시작하면 즉시 멈추고 스크럽 모드로
+      if (!video.paused) {
+        allowPlay = false;
+        try { video.pause(); } catch (_) {}
+      }
 
       down = true;
       stopInertia();
@@ -127,12 +155,22 @@
       lastT = performance.now();
       vx = 0;
 
+      // 탭 후보 시작
+      tapMaybe = true;
+      tapStartX = clientX;
+      tapStartT = lastT;
+
       // 첫 제스처 때 디코드 깨우기
       if (video.paused) primeIOSVideo();
     }
 
     function onMove(clientX) {
       if (!down || !ready) return;
+
+      // 일정 픽셀 이상 움직이면 탭이 아니라 스와이프
+      if (tapMaybe && Math.abs(clientX - tapStartX) > TAP_SLOP_PX) {
+        tapMaybe = false;
+      }
 
       const now = performance.now();
       const dx = clientX - lastX;
@@ -156,6 +194,16 @@
     function onUp() {
       if (!down || !ready) return;
       down = false;
+
+      const now0 = performance.now();
+
+      // 탭으로 판정되면: 재생/정지 토글 (관성 스크럽은 실행 안 함)
+      if (tapMaybe && (now0 - tapStartT) <= TAP_MAX_MS) {
+        tapMaybe = false;
+        togglePlay();
+        return;
+      }
+      tapMaybe = false;
 
       let v = Math.max(-MAX_VELOCITY_PX_PER_MS, Math.min(MAX_VELOCITY_PX_PER_MS, vx));
       let last = performance.now();
@@ -229,9 +277,11 @@
       stepTo(0);
     });
 
-    // iOS에서 autoplay 성공해도 pause로 돌려놓기
+    // iOS에서 autoplay 성공해도 pause로 돌려놓기(단, 탭으로 재생을 허용한 경우는 예외)
     video.addEventListener("play", () => {
-      setTimeout(() => { try { video.pause(); } catch (_) {} }, 0);
+      if (!allowPlay) {
+        setTimeout(() => { try { video.pause(); } catch (_) {} }, 0);
+      }
     });
   </script>
 </body>
