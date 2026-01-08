@@ -4,114 +4,65 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Swipe Video Scrub</title>
-
   <style>
-    html, body {
-      margin: 0;
-      padding: 0;
-      background: #000;
-      height: 100%;
-      overflow: hidden;
-    }
-
-    .stage {
-      position: fixed;
-      inset: 0;
-
+    html, body { margin:0; padding:0; background:#000; height:100%; overflow:hidden; }
+    .stage{
+      position:fixed; inset:0;
       padding-top: env(safe-area-inset-top);
       padding-bottom: env(safe-area-inset-bottom);
       padding-left: env(safe-area-inset-left);
       padding-right: env(safe-area-inset-right);
-      box-sizing: border-box;
-
-      display: flex;
-      align-items: center;
-      justify-content: center;
-
-      height: 100svh;
-      height: 100dvh;
-      width: 100vw;
-
-      touch-action: none;
-      overscroll-behavior: none;
-      -webkit-user-select: none;
-      user-select: none;
-      -webkit-touch-callout: none;
-
-      background: #000;
+      box-sizing:border-box;
+      display:flex; align-items:center; justify-content:center;
+      height:100svh; height:100dvh; width:100vw;
+      touch-action:none; overscroll-behavior:none;
+      -webkit-user-select:none; user-select:none; -webkit-touch-callout:none;
+      background:#000;
     }
-
-    /* 시작 전 포스터를 stage 배경으로도 깔아둠(오버레이 img 실패 대비) */
-    .stage.prestart {
-      background: #000 center / contain no-repeat;
+    .stage.prestart{
+      background:#000 center / contain no-repeat;
       background-image: var(--poster-bg);
     }
-
-    video {
-      width: 100%;
-      height: 100%;
-      object-fit: contain;
-      background: #000;
-      display: block;
-      pointer-events: none; /* 이벤트는 stage가 받음 */
+    video{
+      width:100%; height:100%;
+      object-fit:contain;
+      background:#000;
+      display:block;
+      pointer-events:none;
     }
-
-    .poster {
-      position: absolute;
-      inset: 0;
-      z-index: 5;
-
-      display: flex;
-      align-items: center;
-      justify-content: center;
-
-      background: #000 center / contain no-repeat;
+    .poster{
+      position:absolute; inset:0; z-index:5;
+      display:flex; align-items:center; justify-content:center;
+      background:#000 center / contain no-repeat;
       background-image: var(--poster-bg);
-
-      pointer-events: none;
-      opacity: 1;
+      pointer-events:none;
+      opacity:1;
       transition: opacity 180ms ease;
     }
-    .poster img {
-      width: 100%;
-      height: 100%;
-      object-fit: contain;
-      display: block;
-    }
-    .poster.hidden { opacity: 0; }
+    .poster img{ width:100%; height:100%; object-fit:contain; display:block; }
+    .poster.hidden{ opacity:0; }
 
-    .sound-btn {
-      position: absolute;
+    .sound-btn{
+      position:absolute;
       top: calc(env(safe-area-inset-top) + 10px);
       left: calc(env(safe-area-inset-left) + 10px);
-      z-index: 10;
-
-      pointer-events: auto;
-      border: 0;
-      border-radius: 999px;
-      padding: 10px 12px;
-      background: rgba(0, 0, 0, 0.55);
-      color: #fff;
-      font: 600 14px/1 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-      letter-spacing: 0.2px;
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
+      z-index:10;
+      pointer-events:auto;
+      border:0;
+      border-radius:999px;
+      padding:10px 12px;
+      background: rgba(0,0,0,.55);
+      color:#fff;
+      font:600 14px/1 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      letter-spacing:.2px;
+      display:inline-flex; align-items:center; gap:8px;
       -webkit-tap-highlight-color: transparent;
     }
-    .sound-btn:active { transform: scale(0.98); }
-
-    .sound-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 999px;
-      background: #00ff84;
-      opacity: 0.95;
-    }
-    .sound-dot.off { background: #ff4d4d; }
+    .sound-btn:active{ transform: scale(.98); }
+    .sound-dot{ width:8px; height:8px; border-radius:999px; background:#00ff84; opacity:.95; }
+    .sound-dot.off{ background:#ff4d4d; }
   </style>
 </head>
-
 <body>
   <div class="stage prestart" id="stage">
     <button class="sound-btn" id="soundBtn" type="button" aria-label="Sound toggle">
@@ -124,8 +75,7 @@
       <img id="posterImg" alt="Poster" loading="eager" />
     </div>
 
-    <!-- src는 JS에서 (source/.., ..) 폴백 처리 -->
-    <video id="v" playsinline muted loop preload="auto"></video>
+    <video id="v" playsinline webkit-playsinline muted loop preload="auto"></video>
     <audio id="bgm" loop preload="auto"></audio>
   </div>
 
@@ -136,20 +86,17 @@
   const audio = document.getElementById('bgm');
   const poster = document.getElementById('poster');
   const posterImg = document.getElementById('posterImg');
-
   const soundBtn = document.getElementById('soundBtn');
   const soundDot = document.getElementById('soundDot');
   const soundLabel = document.getElementById('soundLabel');
 
-  // ✅ 경로 폴백: 파일이 root에 있든 source에 있든 동작
   const POSTER_CANDIDATES = ['poster.png', 'source/poster.png'];
   const VIDEO_CANDIDATES  = ['source/video.mp4', 'video.mp4'];
   const AUDIO_CANDIDATES  = ['source/bgm.mp3',  'bgm.mp3'];
 
-  // ✅ 스크럽 감도
   const SCREEN_WIDTHS_PER_FULL_LOOP = 0.85;
   const SCRUB_THRESHOLD_PX = 12;
-  const SCRUB_GRACE_MS = 120;
+  const SCRUB_GRACE_MS = 140;
 
   let started = false;
   let ready = false;
@@ -160,103 +107,103 @@
   let startX = 0;
   let lastX = 0;
   let downAt = 0;
+  let downPointerType = 'mouse';
 
   let pendingTime = null;
   let seekRaf = 0;
 
-  function setPosterCSS(url) {
+  function setPosterCSS(url){
     stage.style.setProperty('--poster-bg', `url("${url}")`);
     poster.style.setProperty('--poster-bg', `url("${url}")`);
   }
 
-  function tryLoadFirstWorking(candidates, onOk) {
-    let i = 0;
-    const tryNext = () => {
+  function tryLoadFirstWorking(candidates, onOk){
+    let i=0;
+    const next = () => {
       const url = candidates[i++];
-      if (!url) return;
-      onOk(url, tryNext);
+      if(!url) return;
+      onOk(url, next);
     };
-    tryNext();
+    next();
   }
 
-  function modTime(t) {
-    if (!duration || !isFinite(duration)) return 0;
+  function modTime(t){
+    if(!duration || !isFinite(duration)) return 0;
     const eps = 0.0005;
     let x = t % duration;
-    if (x < 0) x += duration;
-    if (x >= duration) x = duration - eps;
+    if(x < 0) x += duration;
+    if(x >= duration) x = duration - eps;
     return x;
   }
 
-  function secondsPerPixel() {
+  function secondsPerPixel(){
     const w = Math.max(1, window.innerWidth);
     return duration / (w * SCREEN_WIDTHS_PER_FULL_LOOP);
   }
 
-  function scheduleSeek(t) {
+  function scheduleSeek(t){
     pendingTime = t;
-    if (seekRaf) return;
+    if(seekRaf) return;
     seekRaf = requestAnimationFrame(() => {
       seekRaf = 0;
-      if (pendingTime == null) return;
-      try { video.currentTime = modTime(pendingTime); } catch (_) {}
+      if(pendingTime == null) return;
+      try { video.currentTime = modTime(pendingTime); } catch(_) {}
       pendingTime = null;
     });
   }
 
-  function hidePosterSoon() {
-    if (!poster || poster.dataset.hidden === '1') return;
+  function hidePosterSoon(){
+    if(!poster || poster.dataset.hidden === '1') return;
     poster.dataset.hidden = '1';
     poster.classList.add('hidden');
     setTimeout(() => {
-      if (poster && poster.parentNode) poster.parentNode.removeChild(poster);
+      if(poster && poster.parentNode) poster.parentNode.removeChild(poster);
       stage.classList.remove('prestart');
     }, 220);
   }
 
-  function hidePosterAfterFirstVideoFrame() {
-    try {
-      if (typeof video.requestVideoFrameCallback === 'function') {
+  function hidePosterAfterFirstVideoFrame(){
+    try{
+      if(typeof video.requestVideoFrameCallback === 'function'){
         video.requestVideoFrameCallback(() => hidePosterSoon());
         return;
       }
-    } catch (_) {}
-    setTimeout(hidePosterSoon, 180);
+    }catch(_){}
+    setTimeout(hidePosterSoon, 220);
   }
 
-  function tryEnterFullscreen() {
+  function tryEnterFullscreen(){
     const el = stage;
-    const req =
-      el.requestFullscreen ||
-      el.webkitRequestFullscreen ||
-      el.mozRequestFullScreen ||
-      el.msRequestFullscreen;
-    if (!req) return;
-    try { req.call(el); } catch (_) {}
+    const req = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen || el.msRequestFullscreen;
+    if(!req) return;
+    try { req.call(el); } catch(_) {}
   }
 
-  function updateSoundUI() {
-    const isMuted = !!audio.muted;
-    soundDot.classList.toggle('off', isMuted);
-    soundLabel.textContent = isMuted ? 'SOUND OFF' : 'SOUND ON';
+  function updateSoundUI(){
+    const m = !!audio.muted;
+    soundDot.classList.toggle('off', m);
+    soundLabel.textContent = m ? 'SOUND OFF' : 'SOUND ON';
   }
 
-  // ✅ 1) poster 로딩 폴백 (검정 화면 방지)
+  // poster/video/audio 경로 폴백
   tryLoadFirstWorking(POSTER_CANDIDATES, (url, fail) => {
     setPosterCSS(url);
     posterImg.src = url;
     posterImg.onerror = () => fail();
   });
 
-  // ✅ 2) video/audio src 폴백
   tryLoadFirstWorking(VIDEO_CANDIDATES, (url, fail) => {
     video.src = url;
     video.onerror = () => fail();
   });
+
   tryLoadFirstWorking(AUDIO_CANDIDATES, (url, fail) => {
     audio.src = url;
     audio.onerror = () => fail();
   });
+
+  // Safari(file://) 대응: 초기 load는 1번만 (반복 load는 재생을 끊을 수 있음)
+  try { video.load(); audio.load(); } catch(_) {}
 
   audio.muted = false;
   updateSoundUI();
@@ -266,38 +213,42 @@
     ready = !!duration && isFinite(duration);
   });
 
-  function ensureVideoPlayingInThisGesture() {
-    video.play().then(() => {
+  async function tryPlayVideoOnce(){
+    try{
+      await video.play();
       hidePosterAfterFirstVideoFrame();
-    }).catch(() => {
-      const onCanPlay = () => {
-        video.removeEventListener('canplay', onCanPlay);
-        video.play().then(hidePosterAfterFirstVideoFrame).catch(() => {});
-      };
-      video.addEventListener('canplay', onCanPlay, { once: true });
-    });
+      return true;
+    }catch(_){
+      return false;
+    }
   }
 
-  // ✅ 최초 제스처에서만 시작
-  function startExperience() {
-    if (started) return;
+  function startExperience(){
+    if(started) return;
     started = true;
 
+    // Safari에서 fullscreen이 play를 방해하는 케이스가 있어, play 먼저.
+    video.muted = true;
+    tryPlayVideoOnce();
+
+    audio.play().catch(()=>{});
+    updateSoundUI();
+
+    // fullscreen은 마지막에 시도
     tryEnterFullscreen();
 
-    video.muted = true; // iOS 정책 대비
-    ensureVideoPlayingInThisGesture();
-
-    audio.play().catch(() => {});
-    updateSoundUI();
+    // 아직 재생이 안 붙었다면, 같은 제스처 직후에 한 번 더
+    setTimeout(() => {
+      if(video.paused) tryPlayVideoOnce();
+    }, 0);
   }
 
-  function isSoundButtonEventTarget(e) {
+  function isSoundButtonEventTarget(e){
     const t = e.target;
     return t && (t === soundBtn || (t.closest && t.closest('#soundBtn')));
   }
 
-  // ✅ 사운드 버튼
+  // 사운드 버튼
   soundBtn.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -305,115 +256,126 @@
 
     audio.muted = !audio.muted;
     updateSoundUI();
-    if (!audio.muted) audio.play().catch(() => {});
+    if(!audio.muted) audio.play().catch(()=>{});
   });
   soundBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
-  soundBtn.addEventListener('touchstart', (e) => e.stopPropagation(), { passive: true });
+  soundBtn.addEventListener('touchstart', (e) => e.stopPropagation(), { passive:true });
 
-  // ✅ 입력(스와이프/드래그)
-  function onDown(clientX) {
+  // 입력 처리
+  function onDown(clientX, pointerType){
     startExperience();
 
     pointerDown = true;
     scrubbing = false;
     startX = lastX = clientX;
     downAt = performance.now();
+    downPointerType = pointerType || 'mouse';
   }
 
-  function beginScrubIfNeeded(clientX) {
-    if (scrubbing || !ready) return;
+  function beginScrubIfNeeded(clientX){
+    if(scrubbing || !ready) return;
 
     const elapsed = performance.now() - downAt;
-    if (elapsed < SCRUB_GRACE_MS) return;
+    if(elapsed < SCRUB_GRACE_MS) return;
 
     const moved = Math.abs(clientX - startX);
-    if (moved < SCRUB_THRESHOLD_PX) return;
+    if(moved < SCRUB_THRESHOLD_PX) return;
 
     scrubbing = true;
-    try { video.pause(); } catch (_) {}
+    try { video.pause(); } catch(_) {}
   }
 
-  function onMove(clientX) {
-    if (!pointerDown) return;
+  function onMove(clientX, buttons){
+    if(!pointerDown) return;
+
+    // 마우스(트랙패드)는 버튼이 눌린 상태(클릭 드래그)에서만 스크럽
+    if(downPointerType === 'mouse' && !(buttons & 1)){
+      return;
+    }
 
     beginScrubIfNeeded(clientX);
-    if (!scrubbing || !ready) {
+    if(!scrubbing || !ready){
       lastX = clientX;
       return;
     }
 
     const dx = clientX - lastX;
-    const dt = (-dx) * secondsPerPixel(); // 오른쪽=뒤로, 왼쪽=앞으로
+    const dt = (-dx) * secondsPerPixel();
     scheduleSeek(video.currentTime + dt);
     lastX = clientX;
   }
 
-  function onUp() {
-    if (!pointerDown) return;
+  function onUp(){
+    if(!pointerDown) return;
     pointerDown = false;
 
-    if (scrubbing) {
-      video.play().catch(() => {});
-    } else {
-      // ✅ (핵심) 스와이프 없이 클릭/탭만 해도 바로 재생되게 보정
-      if (started && video.paused) video.play().catch(() => {});
+    if(scrubbing){
+      video.play().catch(()=>{});
+    }else{
+      // 클릭만 해도 재생이 붙도록 보정 (Safari 대응)
+      if(started && video.paused) tryPlayVideoOnce();
     }
     scrubbing = false;
   }
 
   // iOS touch
-  function getTouchX(e) {
+  function getTouchX(e){
     const t = e.touches && e.touches[0];
     return t ? t.clientX : 0;
   }
   stage.addEventListener('touchstart', (e) => {
-    if (isSoundButtonEventTarget(e)) return;
-    if (e.cancelable) e.preventDefault();
-    onDown(getTouchX(e));
-  }, { passive: false });
+    if(isSoundButtonEventTarget(e)) return;
+    if(e.cancelable) e.preventDefault();
+    onDown(getTouchX(e), 'touch');
+  }, { passive:false });
 
   stage.addEventListener('touchmove', (e) => {
-    if (isSoundButtonEventTarget(e)) return;
-    if (e.cancelable) e.preventDefault();
-    onMove(getTouchX(e));
-  }, { passive: false });
+    if(isSoundButtonEventTarget(e)) return;
+    if(e.cancelable) e.preventDefault();
+    onMove(getTouchX(e), 1);
+  }, { passive:false });
 
   stage.addEventListener('touchend', (e) => {
-    if (isSoundButtonEventTarget(e)) return;
-    if (e.cancelable) e.preventDefault();
+    if(isSoundButtonEventTarget(e)) return;
+    if(e.cancelable) e.preventDefault();
     onUp();
-  }, { passive: false });
+  }, { passive:false });
 
   stage.addEventListener('touchcancel', (e) => {
-    if (isSoundButtonEventTarget(e)) return;
-    if (e.cancelable) e.preventDefault();
+    if(isSoundButtonEventTarget(e)) return;
+    if(e.cancelable) e.preventDefault();
     onUp();
-  }, { passive: false });
+  }, { passive:false });
 
-  // Desktop pointer
+  // Desktop pointer only (중복 mouse 핸들러 제거)
   stage.addEventListener('pointerdown', (e) => {
-    if (isSoundButtonEventTarget(e)) return;
+    if(isSoundButtonEventTarget(e)) return;
+    if(e.button != null && e.button !== 0) return;
     stage.setPointerCapture?.(e.pointerId);
-    onDown(e.clientX);
+    onDown(e.clientX, e.pointerType || 'mouse');
   });
-  stage.addEventListener('pointermove', (e) => onMove(e.clientX));
+
+  stage.addEventListener('pointermove', (e) => {
+    onMove(e.clientX, e.buttons || 0);
+  });
+
   stage.addEventListener('pointerup', () => onUp());
   stage.addEventListener('pointercancel', () => onUp());
 
-  // ✅ backup: 일부 Safari/file:// 환경에서 pointer 흐름이 애매할 때 대비
+  // click backup: Safari(file://)에서 pointer 흐름이 애매할 때 대비
   stage.addEventListener('click', (e) => {
-    if (isSoundButtonEventTarget(e)) return;
+    if(isSoundButtonEventTarget(e)) return;
     startExperience();
-    if (video.paused) video.play().catch(() => {});
-  }, { capture: true });
+    if(video.paused) tryPlayVideoOnce();
+  }, { capture:true });
 
-  // 탭 전환 후 복귀
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && started) {
-      video.play().catch(() => {});
-      if (!audio.muted) audio.play().catch(() => {});
+    if(!document.hidden && started){
+      if(video.paused) tryPlayVideoOnce();
+      if(!audio.muted) audio.play().catch(()=>{});
     }
   });
+
 })();
 </script>
 </body>
