@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Swipe Video Scrub</title>
+
   <style>
     html, body {
       margin: 0;
@@ -16,6 +17,7 @@
     .stage {
       position: fixed;
       inset: 0;
+
       padding-top: env(safe-area-inset-top);
       padding-bottom: env(safe-area-inset-bottom);
       padding-left: env(safe-area-inset-left);
@@ -30,259 +32,389 @@
       height: 100dvh;
       width: 100vw;
 
-      /* iOS에서 touch-action만으로는 부족한 경우가 많아서 JS preventDefault와 같이 씀 */
       touch-action: none;
+      overscroll-behavior: none;
       -webkit-user-select: none;
       user-select: none;
+      -webkit-touch-callout: none;
+
+      background: #000;
+    }
+
+    /* 시작 전 포스터를 stage 배경으로도 깔아둠(오버레이 img 실패 대비) */
+    .stage.prestart {
+      background: #000 center / contain no-repeat;
+      background-image: var(--poster-bg);
     }
 
     video {
       width: 100%;
       height: 100%;
-      object-fit: contain;     /* 잘리지 않게 */
+      object-fit: contain;
       background: #000;
       display: block;
-
-      /* 핵심: 비디오 요소가 터치를 가로채지 않게 */
-      pointer-events: none;
-
-      -webkit-user-select: none;
-      user-select: none;
-      -webkit-touch-callout: none;
+      pointer-events: none; /* 이벤트는 stage가 받음 */
     }
+
+    .poster {
+      position: absolute;
+      inset: 0;
+      z-index: 5;
+
+      display: flex;
+      align-items: center;
+      justify-content: center;
+
+      background: #000 center / contain no-repeat;
+      background-image: var(--poster-bg);
+
+      pointer-events: none;
+      opacity: 1;
+      transition: opacity 180ms ease;
+    }
+    .poster img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    .poster.hidden { opacity: 0; }
+
+    .sound-btn {
+      position: absolute;
+      top: calc(env(safe-area-inset-top) + 10px);
+      left: calc(env(safe-area-inset-left) + 10px);
+      z-index: 10;
+
+      pointer-events: auto;
+      border: 0;
+      border-radius: 999px;
+      padding: 10px 12px;
+      background: rgba(0, 0, 0, 0.55);
+      color: #fff;
+      font: 600 14px/1 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      letter-spacing: 0.2px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .sound-btn:active { transform: scale(0.98); }
+
+    .sound-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: #00ff84;
+      opacity: 0.95;
+    }
+    .sound-dot.off { background: #ff4d4d; }
   </style>
 </head>
+
 <body>
-  <div class="stage" id="stage">
-    <video
-      id="v"
-      src="video.mp4"
-      poster="poster.jpg"
-      playsinline
-      muted
-      autoplay
-      preload="auto"
-    ></video>
+  <div class="stage prestart" id="stage">
+    <button class="sound-btn" id="soundBtn" type="button" aria-label="Sound toggle">
+      <span class="sound-dot" id="soundDot"></span>
+      <span id="soundLabel">SOUND ON</span>
+    </button>
+
+    <!-- 최초 로딩: 포스터만 표시 -->
+    <div class="poster" id="poster">
+      <img id="posterImg" alt="Poster" loading="eager" />
+    </div>
+
+    <!-- src는 JS에서 (source/.., ..) 폴백 처리 -->
+    <video id="v" playsinline muted loop preload="auto"></video>
+    <audio id="bgm" loop preload="auto"></audio>
   </div>
 
-  <script>
-    const video = document.getElementById("v");
-    const stage = document.getElementById("stage");
+<script>
+(() => {
+  const stage = document.getElementById('stage');
+  const video = document.getElementById('v');
+  const audio = document.getElementById('bgm');
+  const poster = document.getElementById('poster');
+  const posterImg = document.getElementById('posterImg');
 
-    // ===== 튜닝(반응 더 시원하게) =====
-    const SCREEN_WIDTHS_PER_FULL_LOOP = 0.85; // 더 빠르게(0.55~0.75)
-    const FLICK_GAIN = 1.6;                   // 던질 때 더 멀리
-    const FRICTION = 0.0030;                  // 관성 더 길게
-    const MAX_VELOCITY_PX_PER_MS = 2.0;       // 최대 속도 캡
+  const soundBtn = document.getElementById('soundBtn');
+  const soundDot = document.getElementById('soundDot');
+  const soundLabel = document.getElementById('soundLabel');
 
-    let duration = 0;
-    let ready = false;
+  // ✅ 경로 폴백: 파일이 root에 있든 source에 있든 동작
+  const POSTER_CANDIDATES = ['poster.png', 'source/poster.png'];
+  const VIDEO_CANDIDATES  = ['source/video.mp4', 'video.mp4'];
+  const AUDIO_CANDIDATES  = ['source/bgm.mp3',  'bgm.mp3'];
 
-    let down = false;
-    let lastX = 0;
-    let lastT = 0;
-    let vx = 0;
-    let inertiaRaf = 0;
+  // ✅ 스크럽 감도
+  const SCREEN_WIDTHS_PER_FULL_LOOP = 0.85;
+  const SCRUB_THRESHOLD_PX = 12;
+  const SCRUB_GRACE_MS = 120;
 
-    // ===== 탭(재생/정지) 판정 =====
-    let allowPlay = false;   // 사용자가 탭으로 재생을 명시적으로 허용했는지
-    let tapMaybe = false;
-    let tapStartX = 0;
-    let tapStartT = 0;
-    const TAP_SLOP_PX = 10;
-    const TAP_MAX_MS = 250;
+  let started = false;
+  let ready = false;
+  let duration = 0;
 
-    function modTime(t) {
-      if (!duration || !isFinite(duration)) return 0;
-      const eps = 0.0005;
-      let x = t % duration;
-      if (x < 0) x += duration;
-      if (x >= duration) x = duration - eps;
-      return x;
-    }
+  let pointerDown = false;
+  let scrubbing = false;
+  let startX = 0;
+  let lastX = 0;
+  let downAt = 0;
 
-    function secondsPerPixel() {
-      const w = Math.max(1, window.innerWidth);
-      return duration / (w * SCREEN_WIDTHS_PER_FULL_LOOP);
-    }
+  let pendingTime = null;
+  let seekRaf = 0;
 
-    function stopInertia() {
-      if (inertiaRaf) cancelAnimationFrame(inertiaRaf);
-      inertiaRaf = 0;
-    }
+  function setPosterCSS(url) {
+    stage.style.setProperty('--poster-bg', `url("${url}")`);
+    poster.style.setProperty('--poster-bg', `url("${url}")`);
+  }
 
-    function stepTo(newTime) {
-      video.currentTime = modTime(newTime);
-    }
+  function tryLoadFirstWorking(candidates, onOk) {
+    let i = 0;
+    const tryNext = () => {
+      const url = candidates[i++];
+      if (!url) return;
+      onOk(url, tryNext);
+    };
+    tryNext();
+  }
 
-    async function primeIOSVideo() {
-      // iOS에서 스크럽 안정화: 유저 제스처 안에서 play->pause 한번
-      try {
-        await video.play();
-        video.pause();
-      } catch (_) {
-        // autoplay 정책/상황에 따라 실패할 수 있음 (그래도 touch 이벤트는 유지)
-      }
-    }
+  function modTime(t) {
+    if (!duration || !isFinite(duration)) return 0;
+    const eps = 0.0005;
+    let x = t % duration;
+    if (x < 0) x += duration;
+    if (x >= duration) x = duration - eps;
+    return x;
+  }
 
-    async function togglePlay() {
-      if (!ready) return;
-      stopInertia();
+  function secondsPerPixel() {
+    const w = Math.max(1, window.innerWidth);
+    return duration / (w * SCREEN_WIDTHS_PER_FULL_LOOP);
+  }
 
-      if (video.paused) {
-        allowPlay = true;
-        video.loop = true;
-        try { await video.play(); } catch (_) {}
-      } else {
-        allowPlay = false;
-        try { video.pause(); } catch (_) {}
-      }
-    }
+  function scheduleSeek(t) {
+    pendingTime = t;
+    if (seekRaf) return;
+    seekRaf = requestAnimationFrame(() => {
+      seekRaf = 0;
+      if (pendingTime == null) return;
+      try { video.currentTime = modTime(pendingTime); } catch (_) {}
+      pendingTime = null;
+    });
+  }
 
-    function onDown(clientX) {
-      if (!ready) return;
+  function hidePosterSoon() {
+    if (!poster || poster.dataset.hidden === '1') return;
+    poster.dataset.hidden = '1';
+    poster.classList.add('hidden');
+    setTimeout(() => {
+      if (poster && poster.parentNode) poster.parentNode.removeChild(poster);
+      stage.classList.remove('prestart');
+    }, 220);
+  }
 
-      // 재생 중 스와이프 시작하면 즉시 멈추고 스크럽 모드로
-      if (!video.paused) {
-        allowPlay = false;
-        try { video.pause(); } catch (_) {}
-      }
-
-      down = true;
-      stopInertia();
-
-      lastX = clientX;
-      lastT = performance.now();
-      vx = 0;
-
-      // 탭 후보 시작
-      tapMaybe = true;
-      tapStartX = clientX;
-      tapStartT = lastT;
-
-      // 첫 제스처 때 디코드 깨우기
-      if (video.paused) primeIOSVideo();
-    }
-
-    function onMove(clientX) {
-      if (!down || !ready) return;
-
-      // 일정 픽셀 이상 움직이면 탭이 아니라 스와이프
-      if (tapMaybe && Math.abs(clientX - tapStartX) > TAP_SLOP_PX) {
-        tapMaybe = false;
-      }
-
-      const now = performance.now();
-      const dx = clientX - lastX;
-      const dt = Math.max(1, now - lastT);
-
-      const instV = dx / dt;        // px/ms
-      vx = 0.75 * vx + 0.25 * instV;
-
-      // dx>0(오른쪽) => 시간을 뒤로, dx<0(왼쪽) => 앞으로
-      const base = (-dx) * secondsPerPixel();
-
-      const speed = Math.min(MAX_VELOCITY_PX_PER_MS, Math.abs(vx));
-      const gain = 1 + (speed * FLICK_GAIN);
-
-      stepTo(video.currentTime + base * gain);
-
-      lastX = clientX;
-      lastT = now;
-    }
-
-    function onUp() {
-      if (!down || !ready) return;
-      down = false;
-
-      const now0 = performance.now();
-
-      // 탭으로 판정되면: 재생/정지 토글 (관성 스크럽은 실행 안 함)
-      if (tapMaybe && (now0 - tapStartT) <= TAP_MAX_MS) {
-        tapMaybe = false;
-        togglePlay();
+  function hidePosterAfterFirstVideoFrame() {
+    try {
+      if (typeof video.requestVideoFrameCallback === 'function') {
+        video.requestVideoFrameCallback(() => hidePosterSoon());
         return;
       }
-      tapMaybe = false;
+    } catch (_) {}
+    setTimeout(hidePosterSoon, 180);
+  }
 
-      let v = Math.max(-MAX_VELOCITY_PX_PER_MS, Math.min(MAX_VELOCITY_PX_PER_MS, vx));
-      let last = performance.now();
+  function tryEnterFullscreen() {
+    const el = stage;
+    const req =
+      el.requestFullscreen ||
+      el.webkitRequestFullscreen ||
+      el.mozRequestFullScreen ||
+      el.msRequestFullscreen;
+    if (!req) return;
+    try { req.call(el); } catch (_) {}
+  }
 
-      function tick() {
-        const now = performance.now();
-        const dt = now - last;
-        last = now;
+  function updateSoundUI() {
+    const isMuted = !!audio.muted;
+    soundDot.classList.toggle('off', isMuted);
+    soundLabel.textContent = isMuted ? 'SOUND OFF' : 'SOUND ON';
+  }
 
-        const decay = Math.exp(-FRICTION * dt);
-        v *= decay;
+  // ✅ 1) poster 로딩 폴백 (검정 화면 방지)
+  tryLoadFirstWorking(POSTER_CANDIDATES, (url, fail) => {
+    setPosterCSS(url);
+    posterImg.src = url;
+    posterImg.onerror = () => fail();
+  });
 
-        if (Math.abs(v) < 0.02) {
-          inertiaRaf = 0;
-          return;
-        }
+  // ✅ 2) video/audio src 폴백
+  tryLoadFirstWorking(VIDEO_CANDIDATES, (url, fail) => {
+    video.src = url;
+    video.onerror = () => fail();
+  });
+  tryLoadFirstWorking(AUDIO_CANDIDATES, (url, fail) => {
+    audio.src = url;
+    audio.onerror = () => fail();
+  });
 
-        const ds = (-v) * secondsPerPixel() * dt;
-        stepTo(video.currentTime + ds);
+  audio.muted = false;
+  updateSoundUI();
 
-        inertiaRaf = requestAnimationFrame(tick);
-      }
+  video.addEventListener('loadedmetadata', () => {
+    duration = video.duration || 0;
+    ready = !!duration && isFinite(duration);
+  });
 
-      inertiaRaf = requestAnimationFrame(tick);
+  function ensureVideoPlayingInThisGesture() {
+    video.play().then(() => {
+      hidePosterAfterFirstVideoFrame();
+    }).catch(() => {
+      const onCanPlay = () => {
+        video.removeEventListener('canplay', onCanPlay);
+        video.play().then(hidePosterAfterFirstVideoFrame).catch(() => {});
+      };
+      video.addEventListener('canplay', onCanPlay, { once: true });
+    });
+  }
+
+  // ✅ 최초 제스처에서만 시작
+  function startExperience() {
+    if (started) return;
+    started = true;
+
+    tryEnterFullscreen();
+
+    video.muted = true; // iOS 정책 대비
+    ensureVideoPlayingInThisGesture();
+
+    audio.play().catch(() => {});
+    updateSoundUI();
+  }
+
+  function isSoundButtonEventTarget(e) {
+    const t = e.target;
+    return t && (t === soundBtn || (t.closest && t.closest('#soundBtn')));
+  }
+
+  // ✅ 사운드 버튼
+  soundBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    startExperience();
+
+    audio.muted = !audio.muted;
+    updateSoundUI();
+    if (!audio.muted) audio.play().catch(() => {});
+  });
+  soundBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+  soundBtn.addEventListener('touchstart', (e) => e.stopPropagation(), { passive: true });
+
+  // ✅ 입력(스와이프/드래그)
+  function onDown(clientX) {
+    startExperience();
+
+    pointerDown = true;
+    scrubbing = false;
+    startX = lastX = clientX;
+    downAt = performance.now();
+  }
+
+  function beginScrubIfNeeded(clientX) {
+    if (scrubbing || !ready) return;
+
+    const elapsed = performance.now() - downAt;
+    if (elapsed < SCRUB_GRACE_MS) return;
+
+    const moved = Math.abs(clientX - startX);
+    if (moved < SCRUB_THRESHOLD_PX) return;
+
+    scrubbing = true;
+    try { video.pause(); } catch (_) {}
+  }
+
+  function onMove(clientX) {
+    if (!pointerDown) return;
+
+    beginScrubIfNeeded(clientX);
+    if (!scrubbing || !ready) {
+      lastX = clientX;
+      return;
     }
 
-    // ===== iOS에서 핵심: passive:false + preventDefault =====
-    function getTouchX(e) {
-      const t = e.touches && e.touches[0];
-      return t ? t.clientX : 0;
+    const dx = clientX - lastX;
+    const dt = (-dx) * secondsPerPixel(); // 오른쪽=뒤로, 왼쪽=앞으로
+    scheduleSeek(video.currentTime + dt);
+    lastX = clientX;
+  }
+
+  function onUp() {
+    if (!pointerDown) return;
+    pointerDown = false;
+
+    if (scrubbing) {
+      video.play().catch(() => {});
+    } else {
+      // ✅ (핵심) 스와이프 없이 클릭/탭만 해도 바로 재생되게 보정
+      if (started && video.paused) video.play().catch(() => {});
     }
+    scrubbing = false;
+  }
 
-    stage.addEventListener("touchstart", (e) => {
-      if (e.cancelable) e.preventDefault();
-      onDown(getTouchX(e));
-    }, { passive: false });
+  // iOS touch
+  function getTouchX(e) {
+    const t = e.touches && e.touches[0];
+    return t ? t.clientX : 0;
+  }
+  stage.addEventListener('touchstart', (e) => {
+    if (isSoundButtonEventTarget(e)) return;
+    if (e.cancelable) e.preventDefault();
+    onDown(getTouchX(e));
+  }, { passive: false });
 
-    stage.addEventListener("touchmove", (e) => {
-      if (e.cancelable) e.preventDefault();
-      onMove(getTouchX(e));
-    }, { passive: false });
+  stage.addEventListener('touchmove', (e) => {
+    if (isSoundButtonEventTarget(e)) return;
+    if (e.cancelable) e.preventDefault();
+    onMove(getTouchX(e));
+  }, { passive: false });
 
-    stage.addEventListener("touchend", (e) => {
-      if (e.cancelable) e.preventDefault();
-      onUp();
-    }, { passive: false });
+  stage.addEventListener('touchend', (e) => {
+    if (isSoundButtonEventTarget(e)) return;
+    if (e.cancelable) e.preventDefault();
+    onUp();
+  }, { passive: false });
 
-    stage.addEventListener("touchcancel", (e) => {
-      if (e.cancelable) e.preventDefault();
-      onUp();
-    }, { passive: false });
+  stage.addEventListener('touchcancel', (e) => {
+    if (isSoundButtonEventTarget(e)) return;
+    if (e.cancelable) e.preventDefault();
+    onUp();
+  }, { passive: false });
 
-    // 데스크탑 드래그
-    stage.addEventListener("pointerdown", (e) => {
-      stage.setPointerCapture?.(e.pointerId);
-      onDown(e.clientX);
-    });
-    stage.addEventListener("pointermove", (e) => onMove(e.clientX));
-    stage.addEventListener("pointerup", () => onUp());
-    stage.addEventListener("pointercancel", () => onUp());
+  // Desktop pointer
+  stage.addEventListener('pointerdown', (e) => {
+    if (isSoundButtonEventTarget(e)) return;
+    stage.setPointerCapture?.(e.pointerId);
+    onDown(e.clientX);
+  });
+  stage.addEventListener('pointermove', (e) => onMove(e.clientX));
+  stage.addEventListener('pointerup', () => onUp());
+  stage.addEventListener('pointercancel', () => onUp());
 
-    // ===== 비디오 준비 =====
-    video.addEventListener("loadedmetadata", () => {
-      duration = video.duration || 0;
-      ready = !!duration;
+  // ✅ backup: 일부 Safari/file:// 환경에서 pointer 흐름이 애매할 때 대비
+  stage.addEventListener('click', (e) => {
+    if (isSoundButtonEventTarget(e)) return;
+    startExperience();
+    if (video.paused) video.play().catch(() => {});
+  }, { capture: true });
 
-      // autoplay로 로드만 시키고 바로 pause (스크럽 모드)
-      try { video.pause(); } catch (_) {}
-
-      // 첫 프레임 확정
-      stepTo(0);
-    });
-
-    // iOS에서 autoplay 성공해도 pause로 돌려놓기(단, 탭으로 재생을 허용한 경우는 예외)
-    video.addEventListener("play", () => {
-      if (!allowPlay) {
-        setTimeout(() => { try { video.pause(); } catch (_) {} }, 0);
-      }
-    });
-  </script>
+  // 탭 전환 후 복귀
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && started) {
+      video.play().catch(() => {});
+      if (!audio.muted) audio.play().catch(() => {});
+    }
+  });
+})();
+</script>
 </body>
 </html>
