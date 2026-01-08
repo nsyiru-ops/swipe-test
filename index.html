@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Swipe Video Scrub</title>
+  <title>Swipe Video Scrub (Mobile Fix)</title>
   <style>
     html, body { margin:0; padding:0; background:#000; height:100%; overflow:hidden; }
     .stage{
@@ -70,7 +70,6 @@
       <span id="soundLabel">SOUND ON</span>
     </button>
 
-    <!-- 최초 로딩: 포스터만 표시 -->
     <div class="poster" id="poster">
       <img id="posterImg" alt="Poster" loading="eager" />
     </div>
@@ -94,22 +93,24 @@
   const VIDEO_CANDIDATES  = ['source/video.mp4', 'video.mp4'];
   const AUDIO_CANDIDATES  = ['source/bgm.mp3',  'bgm.mp3'];
 
+  // 모바일 스크럽 튜닝
   const SCREEN_WIDTHS_PER_FULL_LOOP = 0.85;
-  const SCRUB_THRESHOLD_PX = 12;
-  const SCRUB_GRACE_MS = 140;
+  const SCRUB_THRESHOLD_PX = 6;
+  const SCRUB_GRACE_MS = 40;
 
   let started = false;
   let ready = false;
   let duration = 0;
 
-  let pointerDown = false;
+  let down = false;
   let scrubbing = false;
   let startX = 0;
   let lastX = 0;
   let downAt = 0;
   let downPointerType = 'mouse';
 
-  let pendingTime = null;
+  let virtualTime = 0;
+  let targetTime = null;
   let seekRaf = 0;
 
   function setPosterCSS(url){
@@ -141,15 +142,28 @@
     return duration / (w * SCREEN_WIDTHS_PER_FULL_LOOP);
   }
 
-  function scheduleSeek(t){
-    pendingTime = t;
+  function applySeek(){
+    seekRaf = 0;
+    if(targetTime == null) return;
+
+    if (video.seeking) {
+      seekRaf = requestAnimationFrame(applySeek);
+      return;
+    }
+
+    const t = targetTime;
+    targetTime = null;
+
+    try{
+      if (typeof video.fastSeek === 'function') video.fastSeek(t);
+      else video.currentTime = t;
+    }catch(_){}
+  }
+
+  function requestSeek(t){
+    targetTime = modTime(t);
     if(seekRaf) return;
-    seekRaf = requestAnimationFrame(() => {
-      seekRaf = 0;
-      if(pendingTime == null) return;
-      try { video.currentTime = modTime(pendingTime); } catch(_) {}
-      pendingTime = null;
-    });
+    seekRaf = requestAnimationFrame(applySeek);
   }
 
   function hidePosterSoon(){
@@ -185,7 +199,7 @@
     soundLabel.textContent = m ? 'SOUND OFF' : 'SOUND ON';
   }
 
-  // poster/video/audio 경로 폴백
+  // 파일 경로 폴백
   tryLoadFirstWorking(POSTER_CANDIDATES, (url, fail) => {
     setPosterCSS(url);
     posterImg.src = url;
@@ -202,7 +216,6 @@
     audio.onerror = () => fail();
   });
 
-  // Safari(file://) 대응: 초기 load는 1번만 (반복 load는 재생을 끊을 수 있음)
   try { video.load(); audio.load(); } catch(_) {}
 
   audio.muted = false;
@@ -227,17 +240,14 @@
     if(started) return;
     started = true;
 
-    // Safari에서 fullscreen이 play를 방해하는 케이스가 있어, play 먼저.
     video.muted = true;
     tryPlayVideoOnce();
 
     audio.play().catch(()=>{});
     updateSoundUI();
 
-    // fullscreen은 마지막에 시도
     tryEnterFullscreen();
 
-    // 아직 재생이 안 붙었다면, 같은 제스처 직후에 한 번 더
     setTimeout(() => {
       if(video.paused) tryPlayVideoOnce();
     }, 0);
@@ -261,17 +271,6 @@
   soundBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
   soundBtn.addEventListener('touchstart', (e) => e.stopPropagation(), { passive:true });
 
-  // 입력 처리
-  function onDown(clientX, pointerType){
-    startExperience();
-
-    pointerDown = true;
-    scrubbing = false;
-    startX = lastX = clientX;
-    downAt = performance.now();
-    downPointerType = pointerType || 'mouse';
-  }
-
   function beginScrubIfNeeded(clientX){
     if(scrubbing || !ready) return;
 
@@ -282,16 +281,25 @@
     if(moved < SCRUB_THRESHOLD_PX) return;
 
     scrubbing = true;
+    virtualTime = video.currentTime || 0;
     try { video.pause(); } catch(_) {}
   }
 
-  function onMove(clientX, buttons){
-    if(!pointerDown) return;
+  function onDown(clientX, pointerType){
+    startExperience();
 
-    // 마우스(트랙패드)는 버튼이 눌린 상태(클릭 드래그)에서만 스크럽
-    if(downPointerType === 'mouse' && !(buttons & 1)){
-      return;
-    }
+    down = true;
+    scrubbing = false;
+    startX = lastX = clientX;
+    downAt = performance.now();
+    downPointerType = pointerType || 'mouse';
+  }
+
+  function onMove(clientX, buttons){
+    if(!down) return;
+
+    // 데스크톱 마우스는 클릭 드래그에서만 스크럽
+    if(downPointerType === 'mouse' && !(buttons & 1)) return;
 
     beginScrubIfNeeded(clientX);
     if(!scrubbing || !ready){
@@ -301,68 +309,73 @@
 
     const dx = clientX - lastX;
     const dt = (-dx) * secondsPerPixel();
-    scheduleSeek(video.currentTime + dt);
+    virtualTime += dt;
+    requestSeek(virtualTime);
     lastX = clientX;
   }
 
   function onUp(){
-    if(!pointerDown) return;
-    pointerDown = false;
+    if(!down) return;
+    down = false;
 
     if(scrubbing){
-      video.play().catch(()=>{});
-    }else{
-      // 클릭만 해도 재생이 붙도록 보정 (Safari 대응)
+      setTimeout(() => { video.play().catch(()=>{}); }, 0);
+    } else {
       if(started && video.paused) tryPlayVideoOnce();
     }
     scrubbing = false;
   }
 
-  // iOS touch
-  function getTouchX(e){
-    const t = e.touches && e.touches[0];
-    return t ? t.clientX : 0;
+  // 입력 모델 통합
+  const usePointer = !!window.PointerEvent;
+
+  if (usePointer) {
+    stage.addEventListener('pointerdown', (e) => {
+      if(isSoundButtonEventTarget(e)) return;
+      if(e.button != null && e.button !== 0) return;
+      stage.setPointerCapture?.(e.pointerId);
+      onDown(e.clientX, e.pointerType || 'mouse');
+    }, { passive:false });
+
+    stage.addEventListener('pointermove', (e) => {
+      onMove(e.clientX, e.buttons || 0);
+    }, { passive:false });
+
+    stage.addEventListener('pointerup', () => onUp(), { passive:false });
+    stage.addEventListener('pointercancel', () => onUp(), { passive:false });
+
+  } else {
+    function getTouchX(e){
+      const t = e.touches && e.touches[0];
+      return t ? t.clientX : 0;
+    }
+
+    stage.addEventListener('touchstart', (e) => {
+      if(isSoundButtonEventTarget(e)) return;
+      if(e.cancelable) e.preventDefault();
+      onDown(getTouchX(e), 'touch');
+    }, { passive:false });
+
+    stage.addEventListener('touchmove', (e) => {
+      if(isSoundButtonEventTarget(e)) return;
+      if(e.cancelable) e.preventDefault();
+      onMove(getTouchX(e), 1);
+    }, { passive:false });
+
+    stage.addEventListener('touchend', (e) => {
+      if(isSoundButtonEventTarget(e)) return;
+      if(e.cancelable) e.preventDefault();
+      onUp();
+    }, { passive:false });
+
+    stage.addEventListener('touchcancel', (e) => {
+      if(isSoundButtonEventTarget(e)) return;
+      if(e.cancelable) e.preventDefault();
+      onUp();
+    }, { passive:false });
   }
-  stage.addEventListener('touchstart', (e) => {
-    if(isSoundButtonEventTarget(e)) return;
-    if(e.cancelable) e.preventDefault();
-    onDown(getTouchX(e), 'touch');
-  }, { passive:false });
 
-  stage.addEventListener('touchmove', (e) => {
-    if(isSoundButtonEventTarget(e)) return;
-    if(e.cancelable) e.preventDefault();
-    onMove(getTouchX(e), 1);
-  }, { passive:false });
-
-  stage.addEventListener('touchend', (e) => {
-    if(isSoundButtonEventTarget(e)) return;
-    if(e.cancelable) e.preventDefault();
-    onUp();
-  }, { passive:false });
-
-  stage.addEventListener('touchcancel', (e) => {
-    if(isSoundButtonEventTarget(e)) return;
-    if(e.cancelable) e.preventDefault();
-    onUp();
-  }, { passive:false });
-
-  // Desktop pointer only (중복 mouse 핸들러 제거)
-  stage.addEventListener('pointerdown', (e) => {
-    if(isSoundButtonEventTarget(e)) return;
-    if(e.button != null && e.button !== 0) return;
-    stage.setPointerCapture?.(e.pointerId);
-    onDown(e.clientX, e.pointerType || 'mouse');
-  });
-
-  stage.addEventListener('pointermove', (e) => {
-    onMove(e.clientX, e.buttons || 0);
-  });
-
-  stage.addEventListener('pointerup', () => onUp());
-  stage.addEventListener('pointercancel', () => onUp());
-
-  // click backup: Safari(file://)에서 pointer 흐름이 애매할 때 대비
+  // click backup
   stage.addEventListener('click', (e) => {
     if(isSoundButtonEventTarget(e)) return;
     startExperience();
